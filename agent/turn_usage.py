@@ -99,16 +99,17 @@ def record_response_usage(
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = canonical_usage.total_tokens
-    # Canonical token + cache buckets for context engines; legacy keys stay for back-compat.
+    # Advisor prompts belong to separate requests. Only the acting model's usage
+    # can measure this context or confirm that a compaction reduced it.
     usage_dict = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "input_tokens": canonical_usage.input_tokens,
-        "output_tokens": canonical_usage.output_tokens,
-        "cache_read_tokens": canonical_usage.cache_read_tokens,
-        "cache_write_tokens": canonical_usage.cache_write_tokens,
-        "reasoning_tokens": canonical_usage.reasoning_tokens,
+        "prompt_tokens": aggregator_usage.prompt_tokens,
+        "completion_tokens": aggregator_usage.output_tokens,
+        "total_tokens": aggregator_usage.total_tokens,
+        "input_tokens": aggregator_usage.input_tokens,
+        "output_tokens": aggregator_usage.output_tokens,
+        "cache_read_tokens": aggregator_usage.cache_read_tokens,
+        "cache_write_tokens": aggregator_usage.cache_write_tokens,
+        "reasoning_tokens": aggregator_usage.reasoning_tokens,
     }
     # Capture the boundary latch before update_from_response() consumes it: only the real
     # prompt count right after a compaction rearms the budget.
@@ -131,12 +132,12 @@ def record_response_usage(
     _compression_threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
     if _loop_mod()._should_rearm_compression_budget(
         compression_attempts, completed_compaction_pending=_completed_compaction_pending,
-        prompt_tokens=prompt_tokens, threshold_tokens=_compression_threshold,
+        prompt_tokens=aggregator_usage.prompt_tokens, threshold_tokens=_compression_threshold,
     ):
         logger.info(
             "Compression budget rearmed after provider-confirmed "
             "recovery: prompt=%s < threshold=%s (attempts were %s/%s)",
-            f"{prompt_tokens:,}",
+            f"{aggregator_usage.prompt_tokens:,}",
             f"{_compression_threshold:,}",
             compression_attempts,
             max_compression_attempts,
@@ -146,7 +147,7 @@ def record_response_usage(
         # (``_preflight_compression_blocked``), else a later pressure spike grows unchecked.
         rearmed = True
 
-    # Stash canonical usage for on_turn_complete(); keep the latest call's.
+    # Context engines observe the acting request at the turn boundary too.
     agent._last_turn_usage = dict(usage_dict)
     # The parent's CURRENT prompt size for headroom math (delegate summary budgets): the
     # aggregator's own prompt, never the MoA-folded total (advisor prompts are not in this context).
@@ -276,7 +277,7 @@ def record_response_usage(
     # not only when we inject cache_control markers.
     cached = canonical_usage.cache_read_tokens
     written = canonical_usage.cache_write_tokens
-    prompt = usage_dict["prompt_tokens"]
+    prompt = prompt_tokens
     if (cached or written) and not agent.quiet_mode:
         hit_pct = (cached / prompt * 100) if prompt > 0 else 0
         agent._vprint(
