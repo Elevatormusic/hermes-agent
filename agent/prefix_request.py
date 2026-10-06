@@ -54,8 +54,18 @@ def _key(row):
     return {k: row.get(k) for k in _WIRE_KEYS}
 
 
+def _sent(row):
+    """The row as the main loop sends it: the ``api_content`` sidecar replaces ``content``."""
+    from agent.turn_context import substitute_api_content  # Lazy: an import cycle through conversation_compression.
+
+    row = dict(row)
+    substitute_api_content(row)
+    return row
+
+
 def _wire(row):
     """The Chat Completions form of a history row that came after the captured request."""
+    row = _sent(row)
     out = {k: row[k] for k in _WIRE_KEYS if row.get(k) is not None}
     if row.get("role") == "assistant":
         out.setdefault("content", None if out.get("tool_calls") else "")
@@ -90,13 +100,16 @@ def _arguments(value):
 
 
 def _same_row(wire, row):
-    """The sent row carries the stored row: the same shape, the same name or none (the transport drops
-    ``name`` from tool rows), the stored text inside the sent text (the host adds request-time context), and
-    the same tool-call arguments. Non-text parts are refused before this check (``messages_unsupported``). A row that a hook or middleware rewrote would make the handoff summarize
-    text that is not in the history it replaces."""
-    if _shape(wire) != _shape(row) or wire.get("name") not in (None, row.get("name")):
+    """The sent row carries the stored row: the same shape, the same name (the transport drops ``name`` from
+    tool rows only), the stored text (``api_content`` when the row has it) inside the sent text (the host adds
+    request-time context), and the same tool-call arguments. Non-text parts are refused before this check
+    (``messages_unsupported``). A row that a hook or middleware rewrote would make the handoff summarize text
+    that is not in the history it replaces."""
+    if _shape(wire) != _shape(row):
         return False
-    if _words(row.get("content")) not in _words(wire.get("content")):
+    if wire.get("name") != row.get("name") and not (wire.get("name") is None and row.get("role") == "tool"):
+        return False
+    if _words(_sent(row).get("content")) not in _words(wire.get("content")):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
@@ -331,6 +344,17 @@ class PrefixRequest:
         self._check()
         body = self._request(instruction)
         agent = self._agent
+        from hermes_cli.middleware import apply_llm_request_middleware, run_llm_execution_middleware
+        context = {"purpose": "context_prefix_request", "api_request_id": None, "session_id": agent.session_id or "",
+                   "model": agent.model, "provider": agent.provider, "base_url": agent.base_url,
+                   "api_mode": agent.api_mode}
+        # Like a main request, the rows after the capture go through llm_request middleware (redaction, policy).
+        try:
+            body = apply_llm_request_middleware(body, **context).payload
+        except Exception as error:
+            raise PrefixRequestError("middleware_refused") from error
+        if not isinstance(body, dict):
+            raise PrefixRequestError("middleware_refused")
         client = agent._create_request_openai_client(reason="context_prefix_request", api_kwargs=body)
         try:
             from openai import OpenAI
@@ -338,7 +362,6 @@ class PrefixRequest:
                 raise PrefixRequestError("plain_sdk_required")
             self._check()
             started = time.monotonic()
-            from hermes_cli.middleware import run_llm_execution_middleware
 
             def _send(request):
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
@@ -346,10 +369,7 @@ class PrefixRequest:
                     model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
-                response = run_llm_execution_middleware(
-                    body, _send, original_request=body, purpose="context_prefix_request", api_request_id=None,
-                    session_id=agent.session_id or "", model=agent.model, provider=agent.provider,
-                    base_url=agent.base_url, api_mode=agent.api_mode)
+                response = run_llm_execution_middleware(body, _send, original_request=body, **context)
             except Exception as error:
                 raise PrefixRequestError("provider_error") from error
             elapsed = time.monotonic() - started

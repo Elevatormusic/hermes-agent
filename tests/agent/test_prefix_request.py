@@ -371,3 +371,66 @@ def test_a_media_part_in_the_sent_rows_is_refused():
         assert len(calls) == 1
     finally:
         client.close()
+
+
+def test_a_named_user_row_sent_without_its_name_is_refused():
+    # The transport drops ``name`` from tool rows only; a user row without its name lost its speaker.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        _tool_round(history, ordinary)
+        history[0]["name"] = "alice"
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_rows_with_an_api_content_sidecar_are_sent_as_the_main_loop_sends_them():
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        history[0]["api_content"] = "[recalled: short answers]\n\n" + history[0]["content"]
+        ordinary["messages"][1]["content"] = history[0]["api_content"]
+        ordinary_turn(agent, ordinary, history)
+        history.append({"role": "user", "content": "Next.", "api_content": "[note]\n\nNext."})
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-2] == {"role": "user", "content": "[note]\n\nNext."}
+    finally:
+        client.close()
+
+
+def test_a_sent_row_that_is_not_the_stored_api_content_is_refused():
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        history[1]["api_content"] = "The answer is 4."
+        ordinary["messages"][2]["content"] = "The answer is 5." + history[1]["content"]
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_the_request_runs_through_the_request_middleware(monkeypatch):
+    seen = []
+
+    def redact(request=None, **context):
+        seen.append(context.get("purpose"))
+        return {"request": json.loads(json.dumps(request).replace("SECRET", "[redacted]"))}
+    import hermes_cli.plugins as plugins
+    manager = SimpleNamespace(
+        _middleware={"llm_request": [redact]}, has_middleware=lambda kind: kind == "llm_request",
+        invoke_middleware=lambda kind, **kwargs: [redact(**kwargs)] if kind == "llm_request" else [],
+        _report_hook_failure=lambda *args, **kwargs: None)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+        history.append({"role": "user", "content": "The key is SECRET."})
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert seen == ["context_prefix_request"]
+        assert "SECRET" not in json.dumps(calls[1]) and "The key is [redacted]." in json.dumps(calls[1])
+    finally:
+        client.close()
+
