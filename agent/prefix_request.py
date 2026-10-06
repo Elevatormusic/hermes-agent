@@ -118,8 +118,9 @@ def enabled(agent):
     return getattr(getattr(agent, "context_compressor", None), "wants_prefix_request", False) is True
 
 
-def final_body(kwargs):
-    """Merge extra_body like the SDK does. Request-local headers and queries are not supported."""
+def _merged(kwargs):
+    """The request body that the SDK sends: kwargs with extra_body merged. Request-local headers and queries are
+    not supported."""
     if kwargs.get("extra_query") or kwargs.get("extra_headers"):
         raise PrefixRequestError("request_options_unsupported")
     extra = kwargs.get("extra_body") or {}
@@ -127,7 +128,16 @@ def final_body(kwargs):
         raise PrefixRequestError("request_options_unsupported")
     body = {k: v for k, v in kwargs.items() if k not in {"extra_body", "extra_headers", "extra_query", "timeout"}}
     body.update(extra)
-    return _copy(body)
+    return body
+
+
+def final_body(kwargs):
+    """A JSON copy of the request body that the SDK sends."""
+    return _copy(_merged(kwargs))
+
+
+def _row_digests(messages):
+    return [_digest(_key(row)) for row in _source(messages)]
 
 
 def begin_capture(agent, kwargs):
@@ -140,7 +150,9 @@ def begin_capture(agent, kwargs):
     if type(source) is not list:
         return
     try:
-        agent._prefix_capture = {"source": _copy(_source(source)), "route": _route(agent), "body": final_body(kwargs)}
+        body = final_body(kwargs)
+        agent._prefix_capture = {"source": _row_digests(source), "route": _route(agent), "body": body,
+                                 "body_digest": _digest(body)}
     except (PrefixRequestError, TypeError, ValueError):
         # An unsupported capture must never stop an ordinary request.
         return
@@ -152,7 +164,7 @@ def capture_response(agent, kwargs, response):
         return response
     capture = getattr(agent, "_prefix_capture", None)
     try:
-        if capture is None or final_body(kwargs) != capture["body"]:
+        if capture is None or _digest(_merged(kwargs)) != capture["body_digest"]:
             return response
         object.__setattr__(response, "_hermes_prefix_capture", capture)
     except (PrefixRequestError, TypeError, ValueError, AttributeError):
@@ -269,12 +281,13 @@ class PrefixRequest:
             raise PrefixRequestError("no_capture")
         if capsule["route"] != self._route:
             raise PrefixRequestError("route_changed")
-        source = capsule["source"]
-        # The session must start with exactly the captured history. The rows after it (reply, tool results,
-        # a new user message) go after the captured body, as the next ordinary request would send them.
-        if (len(self._source) < len(source)
-                or [_key(row) for row in self._source[:len(source)]] != [_key(row) for row in source]):
+        # The session must start with exactly the captured history (one digest for each row). The rows after it
+        # (reply, tool results, a new user message) go after the captured body, as the next ordinary request
+        # would send them.
+        count = len(capsule["source"])
+        if len(self._source) < count or _row_digests(self._source[:count]) != capsule["source"]:
             raise PrefixRequestError("history_changed")
+        source = self._source[:count]
         suffix = [_wire(row) for row in self._source[len(source):]]
         body = _copy(capsule["body"])
         if (body.get("tool_choice") not in (None, "auto", "none") or body.get("n", 1) != 1

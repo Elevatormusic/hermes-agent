@@ -112,21 +112,26 @@ class WarmHandoffMixin:
             return "refusal"
         return None
 
-    def _warm_handoff_text(self) -> Optional[str]:
-        """Use the one same-prefix request of this attempt. None means: make the normal aux call."""
+    def _warm_handoff_text(self, has_user_turn: bool = True, focus_topic: Optional[str] = None) -> Optional[str]:
+        """Use the one same-prefix request of this attempt. None means: make the normal aux call.
+        ``has_user_turn`` and ``focus_topic`` are the values that the normal summary prompt uses."""
         request, self._prefix_request = getattr(self, "_prefix_request", None), None
         if request is None:
             return None
-        from agent.context_compressor import _redact_compaction_text
+        if not has_user_turn:
+            # The summary check needs the no-user sentinel section, which the five-heading handoff has not.
+            self._last_warm_handoff = {"used": False, "reason": "skipped:no_user_turn"}
+            logger.info("Compression warm handoff skipped (no_user_turn); using the auxiliary summary call")
+            return None
+        from agent.context_compressor import _memory_provider_section, _redact_compaction_text
         from agent.prefix_request import PrefixRequestError
 
         instruction = WARM_HANDOFF_INSTRUCTION
-        focus = getattr(self, "_prefix_focus", None)
+        focus = focus_topic or getattr(self, "_prefix_focus", None)
         if focus:
             instruction += "\nGive more detail to this topic: " + _redact_compaction_text(focus).strip() + "\n"
-        memory = (getattr(self, "_prefix_memory", "") or "").strip()
-        if memory:
-            instruction += "\nAlso keep this context from the memory provider:\n" + memory + "\n"
+        # The same sanitized, data-framed block as the normal summary prompt.
+        instruction += _memory_provider_section(getattr(self, "_prefix_memory", "") or "")
         result = {"used": False, "reason": "", "elapsed_s": None, "prompt_tokens": None, "cache_read_tokens": None}
         self._last_warm_handoff = result
         try:
@@ -166,7 +171,7 @@ class WarmHandoffMixin:
             return False
         if self.summary_model and self.summary_model != self.model:
             return False
-        if provider not in (None, "", "auto") and provider != self.provider:
+        if provider not in (None, "", "auto", "main") and provider != self.provider:
             return False
         return aux_inherits_main_route(self, model or self.model, base_url or self.base_url or "")
 

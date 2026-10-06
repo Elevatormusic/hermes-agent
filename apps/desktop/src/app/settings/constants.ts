@@ -643,7 +643,7 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
     enabled: 'Summarize older context when conversations get large.',
     codexGpt55Autoraise: 'Raise compression to 85% for supported ChatGPT Codex OAuth models.',
     warmHandoff:
-      'Let the main model write the compression summary on its cached prompt, so a server with prompt caching reads only the new messages. Faster when compression uses the same model. Auto: only when compression uses the main model and the server reports cached tokens. On: always try it. Off: always use the compression model. Any failure falls back to the normal summary.'
+      'Let the main model write the compression summary on its cached prompt, so a server with prompt caching reads only the new messages. Faster when compression uses the same model. Auto: only when compression uses the main model, the server reports cached tokens, and the last request finished less than 5 minutes ago. On: always try it. Off: always use the compression model. Any failure falls back to the normal summary.'
   },
   auxiliary: {
     compression: {
