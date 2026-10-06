@@ -327,24 +327,36 @@ summary carrier are unchanged.
 | `auto` | Try it only when `auxiliary.compression` resolves to the main model, the server reported cached prompt tokens for the last main request, and that request completed less than 5 minutes ago. |
 
 Any refusal or failure falls back to the normal auxiliary summary call in the same attempt:
-no capture yet (for example right after a resume), a history row that a hook rewrote, another API mode than
-`chat_completions`, a request with settings that cannot be replayed, a history that does not
+no capture yet (for example right after a resume), a history row that a hook rewrote, an API mode other than
+`chat_completions` or `anthropic_messages`, a request with settings that cannot be replayed, a history that does not
 start with the captured request, a request that would not fit the context window (checked
 with the server-reported prompt count of the captured request), a provider error, a timeout
 (120 s), or a reply without the five headings. The log line `Compression warm handoff
 accepted: elapsed_s=… prompt_tokens=… cache_read_tokens=…` shows each accepted handoff.
+
+On the **Anthropic Messages** route (`anthropic_messages`, including Claude Code OAuth), the warm request
+replays the captured `messages.create` arguments: system blocks, tools, thinking and effort settings, and a
+per-request `anthropic-beta` header (fast mode) stay as they were sent, and the captured messages keep their
+`cache_control` breakpoints, so Anthropic reads them from its prompt cache. The rows after the capture follow
+without a breakpoint, then the instruction as the last text block of the last user message. Before sending,
+the main loop's own request builder renders the stored history again (same converter, same OAuth tool naming);
+the captured messages must match it, cache markers aside, or the attempt falls back. Only the reply limit
+changes: at most 8,192 tokens, or 32,768 when the request thinks (the reasoning counts in the same limit). A
+forced `tool_choice` (`any` or `tool`) and server-side features (`container`, `mcp_servers`, context
+management) are not replayed. The cached prompt count for `auto` is `usage.cache_read_input_tokens`.
 
 The speedup needs the same model and a prompt cache. A summary that goes to a different,
 smaller model cannot reuse the cache of the main model; `auto` therefore skips the warm
 request in that case.
 
 `auto` cannot ask the server whether it caches prompts, so it uses the last main response as
-evidence: `usage.prompt_tokens_details.cached_tokens` greater than 0. Servers that cache but
-do not report this counter are skipped; use `on` for them.
+evidence: `usage.prompt_tokens_details.cached_tokens` (Anthropic: `usage.cache_read_input_tokens`) greater
+than 0. Servers that cache but do not report this counter are skipped; use `on` for them.
 
 | Server | Prefix cache | Reports `cached_tokens` | `auto` |
 | --- | --- | --- | --- |
 | Hosted APIs with prompt caching | yes | yes | used |
+| Anthropic Messages (`anthropic_messages`) | yes, `cache_control` breakpoints | `cache_read_input_tokens` | used |
 | vLLM | yes (default) | only with `--enable-prompt-tokens-details` | used with that flag |
 | SGLang | yes, radix cache (default) | only with `--enable-cache-report` | used with that flag |
 | TensorRT-LLM `trtllm-serve` | yes, KV block reuse | yes | used |
