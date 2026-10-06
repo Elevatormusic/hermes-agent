@@ -253,3 +253,98 @@ def test_context_callback_failure_keeps_attempt_accounting(accounting_attempt, m
     assert client.consume_reference_usage()[0].total_tokens == 0
     assert client.chat.completions._pending_trace is None
     database.queue_token_counts.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["local_validation", "http_auth", "interrupt", "retry"])
+def test_failed_acting_request_records_completed_advisors(monkeypatch, tmp_path, failure):
+    """A failed acting request must retain advisor spend without changing context."""
+    import httpx
+    from openai import AuthenticationError, InternalServerError
+    from agent import moa_loop, turn_api_error
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """model:
+  provider: moa
+  default: audit
+moa:
+  default_preset: audit
+  presets:
+    audit:
+      reference_models:
+        - provider: openrouter
+          model: openai/gpt-4o-mini
+      aggregator:
+        provider: openrouter
+        model: openai/gpt-4o-mini
+""", encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(turn_api_error, "compute_error_backoff", lambda *args, **kwargs: 0)
+    calls = []
+
+    def response(prompt, output):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(
+                content="Completed offline request.", tool_calls=[], refusal=None))],
+            usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=output,
+                                  total_tokens=prompt + output),
+        )
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs["task"])
+        if kwargs["task"] == "moa_reference":
+            return response(100, 5)
+        if calls.count("moa_aggregator") == 2:
+            # The retry must see the advisor delta already recorded, with its trace intact.
+            assert agent.session_total_tokens == 105
+            assert agent.session_api_calls == 0
+            assert getattr(agent, "_last_turn_usage", None) == prior_usage
+            assert client.chat.completions._pending_trace is not None
+            return response(200, 10)
+        if failure == "interrupt":
+            raise InterruptedError("Offline acting request interrupted")
+        if failure == "local_validation":
+            raise ValueError("Offline acting request failed")
+        status = 503 if failure == "retry" else 401
+        wire = httpx.Response(status, request=httpx.Request(
+            "POST", "https://example.invalid/v1/chat/completions"))
+        error_type = InternalServerError if failure == "retry" else AuthenticationError
+        raise error_type("Offline acting request failed", response=wire, body=None)
+
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    agent = AIAgent(
+        api_key="test-key", model="audit", provider="moa", quiet_mode=True,
+        skip_context_files=True, skip_memory=True, enabled_toolsets=[],
+        max_iterations=1, save_trajectories=False, session_db=db, session_id="advisor-error",
+    )
+    client = agent.client
+    prior_usage = getattr(agent, "_last_turn_usage", None)
+    try:
+        result = agent.run_conversation("Give advice about an offline task.")
+        expected_tokens = 315 if failure == "retry" else 105
+        assert agent.session_total_tokens == expected_tokens
+        assert agent.session_estimated_cost_usd > 0
+        assert agent.session_api_calls == (1 if failure == "retry" else 0)
+        pending, cost = client.consume_reference_usage()
+        assert pending.total_tokens == 0
+        assert cost is None
+        if failure == "retry":
+            assert not result.get("error")
+            assert calls == ["moa_reference", "moa_aggregator", "moa_aggregator"]
+            assert agent._last_turn_usage["prompt_tokens"] == 200
+            assert client.chat.completions._pending_trace is None
+        else:
+            assert calls == ["moa_reference", "moa_aggregator"]
+            assert getattr(agent, "_last_turn_usage", None) == prior_usage
+        row = db.get_session("advisor-error")
+        assert row["input_tokens"] + row["output_tokens"] == expected_tokens
+        assert row["estimated_cost_usd"] == pytest.approx(agent.session_estimated_cost_usd)
+        assert row["api_call_count"] == agent.session_api_calls
+    finally:
+        agent.close()
+        db.close()

@@ -97,6 +97,71 @@ def _record_usage_cost(agent, aggregator_usage, moa_client, reference_cost, has_
     return result, delta
 
 
+def _record_usage_ledger(
+    agent, canonical_usage, aggregator_usage, moa_client, reference_cost,
+    has_acting_usage, *, api_call_delta=1,
+):
+    """Add token and cost deltas before response callbacks or error recovery."""
+    agent.session_prompt_tokens += canonical_usage.prompt_tokens
+    agent.session_completion_tokens += canonical_usage.output_tokens
+    agent.session_total_tokens += canonical_usage.total_tokens
+    agent.session_input_tokens += canonical_usage.input_tokens
+    agent.session_output_tokens += canonical_usage.output_tokens
+    agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
+    agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
+    agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+    cost_result, cost_delta = _record_usage_cost(
+        agent, aggregator_usage, moa_client, reference_cost, has_acting_usage,
+    )
+    # Ensure a session row before token deltas are queued.
+    if agent._session_db and agent.session_id:
+        try:
+            if not agent._session_db_created:
+                agent._ensure_db_session()
+            agent._session_db.queue_token_counts(
+                agent.session_id,
+                source=_agent_session_source(agent),
+                input_tokens=canonical_usage.input_tokens,
+                output_tokens=canonical_usage.output_tokens,
+                cache_read_tokens=canonical_usage.cache_read_tokens,
+                cache_write_tokens=canonical_usage.cache_write_tokens,
+                reasoning_tokens=canonical_usage.reasoning_tokens,
+                estimated_cost_usd=cost_delta,
+                cost_status=cost_result.status,
+                cost_source=cost_result.source,
+                billing_provider=agent.provider,
+                billing_base_url=agent.base_url,
+                billing_mode="subscription_included" if cost_result.status == "included" else None,
+                model=agent.model,
+                api_call_count=api_call_delta,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Token persistence failed (session=%s, tokens=%d): %s",
+                agent.session_id, canonical_usage.total_tokens, exc, exc_info=True,
+            )
+
+
+def record_pending_moa_usage(agent: Any, client: Any) -> None:
+    """Record completed advisor requests before an acting request error is handled.
+
+    The atomic consume prevents a later response from adding this spend again.
+    Keep the pending trace and acting context state for a possible retry.
+    """
+    if client is None or not hasattr(client, "consume_reference_usage"):
+        return
+    try:
+        usage, cost = client.consume_reference_usage()
+        usage = usage or CanonicalUsage()
+        if usage.total_tokens or usage.reasoning_tokens or cost is not None:
+            _record_usage_ledger(
+                agent, usage, CanonicalUsage(), client, cost, False, api_call_delta=0,
+            )
+    except Exception as exc:
+        # Accounting errors must not replace the original request error.
+        logger.debug("MoA advisor accounting before error recovery failed: %s", exc, exc_info=True)
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: List[Dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
@@ -127,14 +192,9 @@ def record_response_usage(
     # Persist consumed spend before a context plug-in or calibration callback can fail.
     has_accounting = has_acting_usage or canonical_usage.total_tokens or canonical_usage.reasoning_tokens or _moa_ref_cost is not None
     if has_accounting:
-        agent.session_prompt_tokens += prompt_tokens
-        agent.session_completion_tokens += completion_tokens
-        agent.session_total_tokens += total_tokens
-        agent.session_input_tokens += canonical_usage.input_tokens
-        agent.session_output_tokens += canonical_usage.output_tokens
-        agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
-        agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
-        agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+        _record_usage_ledger(
+            agent, canonical_usage, aggregator_usage, _moa_client, _moa_ref_cost, has_acting_usage,
+        )
         # Rolling history for status-bar averages (last 10).
         with suppress(Exception):
             hist = getattr(agent, "_api_latency_history", None)
@@ -171,44 +231,6 @@ def record_response_usage(
             with suppress(Exception):
                 from agent.nous_wire import maybe_switch_wire_after_first_response
                 maybe_switch_wire_after_first_response(agent, response, agent.session_api_calls)
-
-        cost_result, _cost_delta = _record_usage_cost(
-            agent, aggregator_usage, _moa_client, _moa_ref_cost, has_acting_usage,
-        )
-
-        # Persist per-call token deltas for any session_id so non-CLI runs can't lose
-        # accounting; gateway/session-store writes use absolute totals and safely overwrite
-        # these deltas. Enqueued, not written (a cold state.db UPDATE here stalled the tool
-        # loop); drained at finalize via _persist_session.
-        if agent._session_db and agent.session_id:
-            try:
-                # Ensure the row exists: under concurrent SQLite load the initial
-                # _ensure_db_session() may fail, and UPDATE on a missing row affects 0 rows.
-                if not agent._session_db_created:
-                    agent._ensure_db_session()
-                agent._session_db.queue_token_counts(
-                    agent.session_id,
-                    source=_agent_session_source(agent),
-                    input_tokens=canonical_usage.input_tokens,
-                    output_tokens=canonical_usage.output_tokens,
-                    cache_read_tokens=canonical_usage.cache_read_tokens,
-                    cache_write_tokens=canonical_usage.cache_write_tokens,
-                    reasoning_tokens=canonical_usage.reasoning_tokens,
-                    estimated_cost_usd=_cost_delta,
-                    cost_status=cost_result.status,
-                    cost_source=cost_result.source,
-                    billing_provider=agent.provider,
-                    billing_base_url=agent.base_url,
-                    billing_mode="subscription_included"
-                    if cost_result.status == "included" else None,
-                    model=agent.model,
-                    api_call_count=1,
-                )
-            except Exception as e:  # silent loss here undercounts analytics
-                logger.debug(
-                    "Token persistence failed (session=%s, tokens=%d): %s",
-                    agent.session_id, total_tokens, e,
-                )
 
     if not has_acting_usage:
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
