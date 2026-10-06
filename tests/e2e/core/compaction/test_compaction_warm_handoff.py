@@ -27,7 +27,7 @@ from tests.e2e.core.compaction.test_compaction_manual import (
     _compress_via_tui,
     _run_after,
 )
-from tests.fakes.fake_llm_provider import Error, Text
+from tests.fakes.fake_llm_provider import Error, Text, ToolCall
 
 WARM_TOKEN = "WARM-HANDOFF-OK"
 WARM_HANDOFF = "\n\n".join(f"{heading}\n- {WARM_TOKEN} line." for heading in WARM_HANDOFF_HEADINGS)
@@ -182,7 +182,8 @@ def test_manual_compress_without_the_option_sends_no_warm_request(make_scenario,
 def _answer_warm_requests(sc, *, cached_tokens=0):
     """Answer every warm request with a handoff before the scripted main replies see it.
 
-    ``cached_tokens`` > 0 makes the scripted text replies report a prompt cache, as a caching server does.
+    ``cached_tokens`` > 0 makes the scripted text and tool-call replies report a prompt cache, as a caching
+    server does: an automatic compaction can come right after a tool-call turn.
     Returns the list that collects the warm request bodies."""
     warm_bodies = []
     scripted = sc._main
@@ -195,7 +196,7 @@ def _answer_warm_requests(sc, *, cached_tokens=0):
             warm_bodies.append(rec["body"])
             return Text(WARM_HANDOFF, cached_tokens=777)
         reply = scripted(rec)
-        if cached_tokens and isinstance(reply, Text) and not reply.cached_tokens:
+        if cached_tokens and isinstance(reply, (Text, ToolCall)) and not reply.cached_tokens:
             reply = dataclasses.replace(reply, cached_tokens=cached_tokens)
         return reply
 
