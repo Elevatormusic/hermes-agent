@@ -7,6 +7,7 @@ the tools). Checks:
 * the warm request keeps the exact message prefix and settings of the last ordinary request;
 * an accepted handoff replaces the auxiliary summary call, for ``/compress`` and for automatic compaction;
 * a rejected or failed handoff falls back to one auxiliary summary call in the same attempt;
+* a request or execution middleware that changes the captured part sends no warm request;
 * the mode is off by default; ``auto`` needs a reported prompt cache;
 * every C4 invariant still holds after the compaction (same helpers as the manual and automatic suites).
 """
@@ -109,6 +110,61 @@ def test_a_failed_warm_handoff_falls_back_to_the_aux_summary(make_scenario, tmp_
     assert any(GOOD_SUMMARY_TOKEN in str(m.get("content")) for m in sc.history), "aux summary missing"
     assert not any(WARM_TOKEN in str(m.get("content")) for m in sc.history)
     _run_after(sc, specs[PRE_TURNS:], f"after fallback /compress ({reason})")
+
+
+def _rewrite_prefix_row(request):
+    request["messages"][1]["content"] = "A different captured request."
+
+
+def _rewrite_tools(request):
+    request["tools"] = []
+
+
+def _rewrite_model(request):
+    request["model"] = "another-model"
+
+
+def _register(monkeypatch, kind, rewrite):
+    """A real middleware of the given kind that changes the captured part of the warm request only."""
+    import copy
+
+    from hermes_cli.plugins import _delivery_manager
+
+    def request_middleware(request=None, **context):
+        if context.get("purpose") != "context_prefix_request":
+            return None
+        changed = copy.deepcopy(request)
+        rewrite(changed)
+        return {"request": changed}
+
+    def execution_middleware(request=None, next_call=None, **context):
+        if context.get("purpose") != "context_prefix_request":
+            return next_call()
+        changed = copy.deepcopy(request)
+        rewrite(changed)
+        return next_call(changed)
+
+    callback = request_middleware if kind == "llm_request" else execution_middleware
+    monkeypatch.setitem(_delivery_manager()._middleware, kind, [callback])
+
+
+@pytest.mark.parametrize("rewrite", (_rewrite_prefix_row, _rewrite_tools, _rewrite_model))
+@pytest.mark.parametrize("kind", ("llm_request", "llm_execution"))
+def test_a_middleware_rewrite_of_the_captured_part_falls_back(make_scenario, tmp_path, monkeypatch, kind, rewrite):
+    # The model would summarize a request that is not the history (and the cache would miss): no warm request
+    # reaches the provider, and the same attempt makes one aux summary call.
+    sc, specs = _session(make_scenario, tmp_path, 5)
+    calls_before = len(sc.summary_calls)
+    _register(monkeypatch, kind, rewrite)
+
+    removed, bodies, _unconsumed = _compress_with_main_reply(sc, Text(WARM_HANDOFF))
+
+    assert removed > 0 and sc.committed_compactions() > 0, "/compress did not compact"
+    assert bodies == [], "a rewritten warm request reached the provider"
+    assert len(sc.summary_calls) - calls_before == 1, "the fallback must be one aux summary call"
+    assert sc.agent.context_compressor._last_warm_handoff["reason"] == "unavailable:middleware_rewrite"
+    assert not any(WARM_TOKEN in str(m.get("content")) for m in sc.history)
+    _run_after(sc, specs[PRE_TURNS:], f"after a {kind} rewrite")
 
 
 def test_manual_compress_without_the_option_sends_no_warm_request(make_scenario, tmp_path):
