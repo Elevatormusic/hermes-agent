@@ -200,7 +200,7 @@ def test_a_tool_call_reply_is_published_and_its_tool_rows_follow():
         request("Write the handoff.", timeout_s=30)
         assert calls[0]["messages"][-3:] == [
             {"role": "assistant", "content": None, "tool_calls": [wire_call]},
-            {"role": "tool", "tool_call_id": "call-1", "name": "synthetic_tool", "content": "result"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "result"},  # The transport drops a tool name.
             {"role": "user", "content": "Write the handoff."}]
     finally:
         client.close()
@@ -478,6 +478,43 @@ def test_a_replacement_reply_from_execution_middleware_is_refused(monkeypatch):
             _execution_middleware(monkeypatch, middleware)
             with pytest.raises(PrefixRequestError, match="middleware_changed_reply"):
                 PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_appended_tool_calls_are_sanitized_like_a_main_request():
+    # Strict providers reject call_id and response_item_id; only a Gemini model reads extra_content.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1", "type": "function",
+             "extra_content": {"google": {"thought_signature": "sig"}},
+             "function": {"name": "synthetic_tool", "arguments": "{}"}}]})
+        history.append({"role": "tool", "tool_call_id": "call_1", "content": "ok"})
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-3]["tool_calls"] == [
+            {"id": "call_1", "type": "function", "function": {"name": "synthetic_tool", "arguments": "{}"}}]
+    finally:
+        client.close()
+
+
+def test_a_request_middleware_that_changes_the_captured_part_is_refused(monkeypatch):
+    # The captured request already went through llm_request middleware; a second pass would apply it twice.
+    def prepend(request=None, **context):
+        return {"request": {**request, "messages": [{"role": "system", "content": "policy"}, *request["messages"]]}}
+    import hermes_cli.plugins as plugins
+    manager = SimpleNamespace(
+        _middleware={"llm_request": [prepend]}, has_middleware=lambda kind: kind == "llm_request",
+        invoke_middleware=lambda kind, **kwargs: [prepend(**kwargs)] if kind == "llm_request" else [],
+        _report_hook_failure=lambda *args, **kwargs: None)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+        with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
     finally:
         client.close()
 

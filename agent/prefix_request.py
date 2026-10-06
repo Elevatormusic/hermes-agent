@@ -313,6 +313,10 @@ class PrefixRequest:
         source = self._source[:count]
         copy_reasoning = getattr(agent, "_copy_reasoning_content_for_api", None)
         suffix = [_wire(row, copy_reasoning) for row in self._source[len(source):]]
+        # The main loop's transport rule: no call_id or response_item_id, extra_content only for Gemini, no name
+        # on tool rows.
+        from agent.transports.chat_completions import ChatCompletionsTransport
+        suffix = ChatCompletionsTransport().convert_messages(suffix, model=agent.model, base_url=agent.base_url)
         body = _copy(capsule["body"])
         if (body.get("tool_choice") not in (None, "auto", "none") or body.get("n", 1) != 1
                 or any(key in body for key in _UNSUPPORTED_SETTINGS)):
@@ -361,11 +365,18 @@ class PrefixRequest:
                    "api_mode": agent.api_mode}
         # Like a main request, the rows after the capture go through llm_request middleware (redaction, policy).
         try:
-            body = apply_llm_request_middleware(body, **context).payload
+            changed = apply_llm_request_middleware(body, **context).payload
         except Exception as error:
             raise PrefixRequestError("middleware_refused") from error
-        if not isinstance(body, dict):
+        if not isinstance(changed, dict) or not isinstance(changed.get("messages"), list):
             raise PrefixRequestError("middleware_refused")
+        # The captured request went through llm_request middleware already: a change to it (for example, an added
+        # system row) would apply twice and change the cached prefix. The rows after it can change.
+        count = len(self._capsule["body"]["messages"])
+        if ({k: v for k, v in changed.items() if k != "messages"} != {k: v for k, v in body.items() if k != "messages"}
+                or changed["messages"][:count] != body["messages"][:count]):
+            raise PrefixRequestError("middleware_rewrite")
+        body = changed
         client = agent._create_request_openai_client(reason="context_prefix_request", api_kwargs=body)
         try:
             from openai import OpenAI
