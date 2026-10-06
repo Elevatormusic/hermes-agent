@@ -125,6 +125,17 @@ def _same_row(wire, row):
     return calls(wire) == calls(row)
 
 
+def _same_replay_fields(wire, expected):
+    """The sent row has the reasoning fields and thought signatures that the main loop replays for the stored
+    row on this route. The provider reads them: a middleware that changed them made a prefix that the history
+    does not have."""
+    if any(wire.get(key) != expected.get(key) for key in ("reasoning_content", "reasoning_details")):
+        return False
+    def signatures(row):
+        return [call.get("extra_content") for call in row.get("tool_calls") or [] if isinstance(call, dict)]
+    return signatures(wire) == signatures(expected)
+
+
 def _dump(response):
     """A comparable copy of an SDK response."""
     dump = getattr(response, "model_dump", None)
@@ -345,6 +356,10 @@ class PrefixRequest:
         # The body must render exactly these rows (no selection, merge, or extra row).
         rows = body["messages"][offset:]
         if len(rows) != len(source) or not all(_same_row(wire, row) for wire, row in zip(rows, source)):
+            raise PrefixRequestError("source_transform_unsupported")
+        expected = ChatCompletionsTransport().convert_messages([_wire(row, copy_reasoning) for row in source],
+                                                               model=agent.model, base_url=agent.base_url)
+        if not all(_same_replay_fields(wire, want) for wire, want in zip(rows, expected)):
             raise PrefixRequestError("source_transform_unsupported")
         from agent.model_metadata import estimate_request_tokens_rough
         # The server count of the captured request is exact; only the new rows are estimated.

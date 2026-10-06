@@ -280,7 +280,7 @@ def _tool_round(history, ordinary):
     ]
     ordinary["messages"] = [ordinary["messages"][0],
         {"role": "user", "content": "Read the file.\n\n[recalled context: the user wants short answers]"},
-        {"role": "assistant", "content": "", "reasoning_content": "Look first.",
+        {"role": "assistant", "content": "",
          "tool_calls": [{"id": "call_1", "type": "function",
                          "function": {"name": "synthetic_tool", "arguments": '{"path":"a.txt"}'}}]},
         {"role": "tool", "tool_call_id": "call_1", "content": "file text " * 50},
@@ -435,11 +435,18 @@ def test_the_request_runs_through_the_request_middleware(monkeypatch):
         client.close()
 
 
+def _pad_assistant_rows(ordinary):
+    for row in ordinary["messages"]:
+        if row["role"] == "assistant":
+            row["reasoning_content"] = " "
+
+
 def test_appended_assistant_rows_get_reasoning_content_like_a_main_request():
     # A thinking-mode route (DeepSeek, Kimi) rejects an assistant row without reasoning_content.
     from agent.message_sanitization import apply_reasoning_content_policy
     agent, calls, ordinary, client, history = make_agent()
     agent._copy_reasoning_content_for_api = lambda source, target: apply_reasoning_content_policy(source, target, True)
+    _pad_assistant_rows(ordinary)
     try:
         ordinary_turn(agent, ordinary, history)
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
@@ -668,6 +675,48 @@ def test_an_execution_middleware_can_redact_the_rows_after_the_capture(monkeypat
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert calls[1]["messages"][-2]["content"] == "[redacted]"
         assert calls[1]["messages"][:len(calls[0]["messages"])] == calls[0]["messages"]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("change", [lambda row: row.update(reasoning_content="Other thinking."),
+                                    lambda row: row.pop("reasoning_content")])
+def test_changed_reasoning_content_in_a_captured_row_is_refused(change):
+    # The provider reads reasoning_content. A changed field makes a prefix that the history does not have.
+    from agent.message_sanitization import apply_reasoning_content_policy
+    agent, calls, ordinary, client, history = make_agent()
+    agent._copy_reasoning_content_for_api = lambda source, target: apply_reasoning_content_policy(source, target, True)
+    _pad_assistant_rows(ordinary)
+    change(ordinary["messages"][2])
+    try:
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("sent, accepted", [
+    ([{"type": "reasoning.encrypted", "data": "abc"}], True),
+    (None, False),
+    ([{"type": "reasoning.encrypted", "data": "other"}], False),
+])
+def test_reasoning_details_of_a_captured_row_must_be_the_stored_ones(sent, accepted):
+    agent, calls, ordinary, client, history = make_agent()
+    agent.base_url = "https://openrouter.ai/api/v1"
+    history[1]["reasoning_details"] = [{"type": "reasoning.encrypted", "data": "abc"}]
+    if sent is not None:
+        ordinary["messages"][2]["reasoning_details"] = sent
+    try:
+        ordinary_turn(agent, ordinary, history)
+        if accepted:
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 2
+        else:
+            with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+                PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 1
     finally:
         client.close()
 
