@@ -93,6 +93,10 @@ def test_manual_compress_uses_the_warm_reply_and_no_aux_call():
     (FakePrefixRequest(reply={"content": "\n\n".join(reversed(HANDOFF.split("\n\n"))), "finish_reason": "stop",
                               "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
      "refused:heading_order"),
+    # Text before the first heading can be an answer, or an action that did not occur: not a summary.
+    (FakePrefixRequest(reply={"content": "I ran the tests and they pass.\n\n" + HANDOFF, "finish_reason": "stop",
+                              "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
+     "refused:heading_preamble"),
     (FakePrefixRequest(reply={"content": "\n".join(WARM_HANDOFF_HEADINGS), "finish_reason": "stop",
                               "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
      "refused:section_empty"),

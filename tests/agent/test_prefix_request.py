@@ -897,3 +897,26 @@ def test_a_route_without_a_limit_gets_the_handoff_limit_in_its_own_field():
     finally:
         client.close()
 
+
+@pytest.mark.parametrize("change, reason", [
+    (lambda agent, fence: fence.cancel_before_commit(), "cancelled"),
+    (lambda agent, fence: setattr(agent, "model", "another-model"), "route_changed"),
+])
+def test_the_attempt_is_checked_again_at_the_send_seam(monkeypatch, change, reason):
+    # Compression runs on a pooled thread and can outlive a host timeout: an execution middleware can call
+    # next_call after a cancel or a model switch.
+    agent, calls, ordinary, client, history = make_agent()
+    fence = CompressionCommitFence()
+
+    def late(request=None, next_call=None, **context):
+        change(agent, fence)
+        return next_call()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, late)
+        with pytest.raises(PrefixRequestError, match=reason):
+            PrefixRequest(agent, history, fence)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+

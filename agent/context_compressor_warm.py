@@ -47,7 +47,7 @@ Rules:
 - Write in the language of the conversation. Use short bullets. Use at most 600 words.
 - Leave out data that the task does not need, for example unrelated records or logs.
 
-Use these five headings, in this order, each on its own line:
+Use these five headings, in this order, each on its own line. Start the reply with "## Goal":
 
 ## Goal
 The current goal of the user, in one or two sentences.
@@ -114,6 +114,9 @@ class WarmHandoffMixin:
         starts = [lines.index(heading) for heading in WARM_HANDOFF_HEADINGS]
         if starts != sorted(starts):
             return "heading_order"
+        # Text before the first heading can be an answer, or an action that did not occur: not a summary.
+        if next((line for line in lines if line), "") != WARM_HANDOFF_HEADINGS[0]:
+            return "heading_preamble"
         # Goal, state, and next step are needed to continue; there can be no user instructions or key facts.
         for heading, start, end in zip(WARM_HANDOFF_HEADINGS, starts, [*starts[1:], len(lines)]):
             if heading in ("## Goal", "## Current state", "## Next step") and not any(lines[start + 1:end]):

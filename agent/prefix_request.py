@@ -495,6 +495,8 @@ class PrefixRequest:
                 # captured part, the settings, and the instruction must be the ones that the checks above accepted.
                 if not _same_request(base, request, count, instruction):
                     raise PrefixRequestError("middleware_rewrite")
+                # An execution middleware can run after a cancel, a route switch, or the deadline: check again.
+                self._check()
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
                 response = client.chat.completions.create(
                     model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
