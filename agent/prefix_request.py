@@ -227,11 +227,14 @@ def capture_response(agent, kwargs, response):
 
 
 def _single_reply(response):
-    """Return (finish_reason, message) of a one-choice response, else (None, None)."""
+    """Return (finish_reason, message) of a one-choice response, else (None, None). The finish reason is the
+    lowercase contract value (``STOP`` is ``stop``), as the transport gives it for a main request."""
+    from agent.message_sanitization import normalize_finish_reason
+
     choices = getattr(response, "choices", None)
     if not isinstance(choices, (list, tuple)) or len(choices) != 1:
         return None, None
-    return getattr(choices[0], "finish_reason", None), getattr(choices[0], "message", None)
+    return normalize_finish_reason(getattr(choices[0], "finish_reason", None)), getattr(choices[0], "message", None)
 
 
 def publish_response(agent, response):

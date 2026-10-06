@@ -17,7 +17,7 @@ from agent.prefix_request import (
 REPLY = "Completed synthetic reply."
 
 
-def make_agent(usage=None, reply_content="Synthetic handoff."):
+def make_agent(usage=None, reply_content="Synthetic handoff.", finish="stop"):
     calls = []
 
     def sink(request):
@@ -25,7 +25,7 @@ def make_agent(usage=None, reply_content="Synthetic handoff."):
         content = REPLY if len(calls) == 1 else reply_content
         return httpx.Response(200, request=request, json={
             "id": "synthetic", "object": "chat.completion", "created": 0, "model": "synthetic",
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+            "choices": [{"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": content}}],
             "usage": usage or {"prompt_tokens": 5000, "completion_tokens": 5, "total_tokens": 5005},
         })
 
@@ -739,6 +739,18 @@ def test_the_handoff_has_its_own_reply_limit(main, sent):
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         limits = ("max_tokens", "max_completion_tokens")
         assert {key: calls[1][key] for key in limits if key in calls[1]} == sent
+    finally:
+        client.close()
+
+
+def test_a_provider_spelling_of_the_finish_reason_is_normalized():
+    # Some OpenAI-compatible servers send STOP. The transport normalizes it for a main request; the capture and
+    # the warm reply do not go through the transport.
+    agent, calls, ordinary, client, history = make_agent(finish="STOP")
+    try:
+        ordinary_turn(agent, ordinary, history)
+        result = PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert result["finish_reason"] == "stop"
     finally:
         client.close()
 
