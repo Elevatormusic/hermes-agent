@@ -516,23 +516,35 @@ class PrefixRequest:
             sent = []
             # A copy that no middleware can change in place: the request identity check below compares with it.
             base = copy.deepcopy(body)
+            send_lock = threading.RLock()
+            send_active = True
 
             def _send(request):
-                # The last seam before the provider: an execution middleware can have changed the request. The
-                # captured part, the settings, and the instruction must be the ones that the checks above accepted.
-                if not _same_request(base, request, count, instruction):
-                    raise PrefixRequestError("middleware_rewrite")
-                # An execution middleware can run after a cancel, a route switch, or the deadline: check again.
-                self._check()
-                # The final body travels in extra_body; the SDK merges it after its typed fields.
-                response = client.chat.completions.create(
-                    model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
-                sent.append((response, _dump(response)))
-                return response
+                # Client release must wait for a callback that has started its provider call.
+                with send_lock:
+                    if not send_active:
+                        raise PrefixRequestError("attempt_finished")
+                    # The captured part, settings, and instruction must stay unchanged.
+                    if not _same_request(base, request, count, instruction):
+                        raise PrefixRequestError("middleware_rewrite")
+                    # An execution middleware can add text after the captured prefix.
+                    self._check_capacity(request, count)
+                    # Check cancellation, route, history, and deadline at the provider boundary.
+                    self._check()
+                    # The SDK merges extra_body after its typed fields.
+                    response = client.chat.completions.create(
+                        model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
+                    sent.append((response, _dump(response)))
+                    return response
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
-                response = run_llm_execution_middleware(
-                    body, _send, original_request=copy.deepcopy(base), **context)
+                try:
+                    response = run_llm_execution_middleware(
+                        body, _send, original_request=copy.deepcopy(base), **context)
+                finally:
+                    # A stored callback must not use this client after middleware returns or raises.
+                    with send_lock:
+                        send_active = False
             except PrefixRequestError:
                 raise
             except Exception as error:

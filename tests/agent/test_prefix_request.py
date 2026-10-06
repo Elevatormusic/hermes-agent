@@ -991,3 +991,63 @@ def test_a_changed_tool_call_type_is_refused():
     assert _no_extra_fields(want, want)
     assert not _no_extra_fields(changed, want)
 
+
+def test_execution_middleware_growth_is_checked_before_the_provider_call(monkeypatch):
+    def grow(request=None, next_call=None, **context):
+        request["messages"][-2]["content"] = "large text " * 20_000
+        return next_call()
+
+    agent, calls, ordinary, client, history = make_agent()
+    agent.context_compressor.context_length = 10_000
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, grow)
+        with pytest.raises(PrefixRequestError, match="^capacity$"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_execution_middleware_cannot_send_after_the_attempt_returns(monkeypatch):
+    from hermes_cli.middleware import _DownstreamExecutionError
+
+    stored = []
+
+    def defer(request=None, next_call=None, **context):
+        stored.append(next_call)
+        return None
+
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, defer)
+        with pytest.raises(PrefixRequestError, match="^incomplete_response$"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        # The middleware callback wraps errors until an active chain can unwrap them.
+        with pytest.raises(_DownstreamExecutionError) as caught:
+            stored[0]()
+        assert isinstance(caught.value.original, PrefixRequestError)
+        assert str(caught.value.original) == "attempt_finished"
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_execution_middleware_can_wait_for_a_worker_callback(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def worker(request=None, next_call=None, **context):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(next_call).result()
+
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, worker)
+        result = PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert result["content"] == "Synthetic handoff."
+        assert len(calls) == 2
+    finally:
+        client.close()
+
