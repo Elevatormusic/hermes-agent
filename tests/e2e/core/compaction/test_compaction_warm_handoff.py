@@ -129,7 +129,9 @@ def _answer_warm_requests(sc, *, cached_tokens=0):
 
     def main(rec):
         last = rec["body"]["messages"][-1]
-        if last.get("role") == "user" and str(last.get("content") or "").startswith(WARM_MARK):
+        # The instruction is the last block of the last user row: a trailing user row comes in front of it.
+        text = str(last.get("content") or "")
+        if last.get("role") == "user" and (text.startswith(WARM_MARK) or "\n\n" + WARM_MARK in text):
             warm_bodies.append(rec["body"])
             return Text(WARM_HANDOFF, cached_tokens=777)
         reply = scripted(rec)

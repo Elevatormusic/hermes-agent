@@ -113,11 +113,12 @@ def _arguments(value):
 
 
 def _in_whole_lines(stored, sent):
-    """The stored text is in the sent text as whole lines. The host adds request-time context as separate lines
-    (``"\n\n" + context``); text on the same line can change the meaning ("Delete A" to "Do not Delete A")."""
-    if not stored:
+    """The stored text is in the sent text as whole lines, with its white space. The host adds request-time
+    context as separate lines (``"\n\n" + context``); text on the same line can change the meaning ("Delete A"
+    to "Do not Delete A"), and so can changed indentation."""
+    if not stored.strip():
         return True
-    return re.search(r"(?:^|\n)[ \t]*" + re.escape(stored) + r"[ \t]*(?:\n|$)", sent) is not None
+    return re.search(r"(?:^|\n)" + re.escape(stored) + r"(?:\n|$)", sent) is not None
 
 
 def _same_row(wire, row):
@@ -130,7 +131,7 @@ def _same_row(wire, row):
         return False
     if wire.get("name") != row.get("name") and not (wire.get("name") is None and row.get("role") == "tool"):
         return False
-    if not _in_whole_lines(_text(_sent(row).get("content")).strip(), _text(wire.get("content"))):
+    if not _in_whole_lines(_text(_sent(row).get("content")), _text(wire.get("content"))):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
@@ -154,16 +155,46 @@ def _dump(response):
     return dump() if callable(dump) else repr(response)
 
 
-def _same_request(base, request, count):
+def _ends_with_instruction(row, instruction):
+    """The row is a user row whose last block is the host instruction (it can join the last user row)."""
+    if not isinstance(row, dict) or row.get("role") != "user":
+        return False
+    content = row.get("content")
+    if isinstance(content, str):
+        return content == instruction or content.endswith("\n\n" + instruction)
+    return (isinstance(content, list) and bool(content) and isinstance(content[-1], dict)
+            and content[-1].get("type") == "text" and content[-1].get("text") == instruction)
+
+
+def _join_user_rows(rows):
+    """Join adjacent user rows of the same author as the main loop joins them (``_merge_user_content``): the
+    ordinary request has no adjacent user rows, and strict chat templates refuse them. The host instruction is
+    the last block of the last user row; it says that it comes from the host."""
+    from agent.agent_runtime_helpers import _UNMERGEABLE, _merge_user_content
+
+    out = []
+    for row in rows:
+        last = out[-1] if out else None
+        if (last is not None and last.get("role") == row.get("role") == "user" and last.get("name") == row.get("name")
+                and set(last) <= {"role", "content", "name"} and set(row) <= {"role", "content", "name"}):
+            joined = _merge_user_content(last.get("content"), row.get("content"))
+            if joined is not _UNMERGEABLE:
+                out[-1] = {**last, "content": joined}
+                continue
+        out.append(row)
+    return out
+
+
+def _same_request(base, request, count, instruction):
     """The sent request keeps what the cache and the summary depend on: every setting (model, tools, sampling),
-    the first ``count`` messages (the captured request), and the last message (the host instruction). Only the
-    rows after the capture can differ, for example after a redaction."""
+    the first ``count`` messages (the captured request), and the host instruction as the last block of the last
+    message. Only the rows after the capture can differ, for example after a redaction."""
     return (isinstance(request, dict) and isinstance(request.get("messages"), list)
             and len(request["messages"]) > count
             and {k: v for k, v in request.items() if k != "messages"}
             == {k: v for k, v in base.items() if k != "messages"}
             and request["messages"][:count] == base["messages"][:count]
-            and request["messages"][-1] == base["messages"][-1])
+            and _ends_with_instruction(request["messages"][-1], instruction))
 
 
 def _route(agent):
@@ -380,7 +411,7 @@ class PrefixRequest:
         # The server count of the captured request is exact; only the new rows are estimated.
         reported = ((capsule.get("usage") or {}).get("prompt_tokens"))
         self._prefix_tokens = reported or estimate_request_tokens_rough(body["messages"], tools=body.get("tools"))
-        added = [*suffix, {"role": "user", "content": instruction}]
+        added = _join_user_rows([*suffix, {"role": "user", "content": instruction}])
         body["messages"] = [*body["messages"], *added]
         self._text_messages(body["messages"])
         body["stream"] = False
@@ -438,7 +469,7 @@ class PrefixRequest:
         # The captured request went through llm_request middleware already: a change to it (for example, an added
         # system row) would apply twice and change the cached prefix. The rows after it can change.
         count = len(self._capsule["body"]["messages"])
-        if not _same_request(body, changed, count):
+        if not _same_request(body, changed, count, instruction):
             raise PrefixRequestError("middleware_rewrite")
         body = changed
         # A request middleware can add text to the rows after the capture: check the size again.
@@ -458,7 +489,7 @@ class PrefixRequest:
             def _send(request):
                 # The last seam before the provider: an execution middleware can have changed the request. The
                 # captured part, the settings, and the instruction must be the ones that the checks above accepted.
-                if not _same_request(base, request, count):
+                if not _same_request(base, request, count, instruction):
                     raise PrefixRequestError("middleware_rewrite")
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
                 response = client.chat.completions.create(

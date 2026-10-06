@@ -173,9 +173,9 @@ def test_rows_after_the_captured_request_are_appended_in_order():
         first, second = calls
         n = len(first["messages"])
         assert second["messages"][:n] == first["messages"]
+        # The instruction joins the new user message: no two adjacent user rows.
         assert second["messages"][n:] == [{"role": "assistant", "content": REPLY},
-                                          {"role": "user", "content": "Next question."},
-                                          {"role": "user", "content": "Write the handoff."}]
+                                          {"role": "user", "content": "Next question.\n\nWrite the handoff."}]
     finally:
         client.close()
 
@@ -395,7 +395,8 @@ def test_rows_with_an_api_content_sidecar_are_sent_as_the_main_loop_sends_them()
         ordinary_turn(agent, ordinary, history)
         history.append({"role": "user", "content": "Next.", "api_content": "[note]\n\nNext."})
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
-        assert calls[1]["messages"][-2] == {"role": "user", "content": "[note]\n\nNext."}
+        # The instruction joins the trailing user row: strict chat templates refuse two adjacent user rows.
+        assert calls[1]["messages"][-1] == {"role": "user", "content": "[note]\n\nNext.\n\nWrite the handoff."}
     finally:
         client.close()
 
@@ -795,6 +796,71 @@ def test_the_capacity_check_reserves_the_larger_reply_limit():
     try:
         ordinary_turn(agent, ordinary, history)
         with pytest.raises(PrefixRequestError, match="capacity"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("sent, accepted", [("0 data", False), ("[ctx]\n\n    0 data", True)])
+def test_changed_white_space_around_a_stored_row_is_refused(sent, accepted):
+    # A middleware that dedents the first line of a code fragment changes its meaning.
+    agent, calls, ordinary, client, history = make_agent()
+    history[0]["content"] = "    0 data"
+    ordinary["messages"][1]["content"] = sent
+    try:
+        ordinary_turn(agent, ordinary, history)
+        if accepted:
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 2
+        else:
+            with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+                PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_no_two_adjacent_user_rows_are_sent():
+    # Trailing user rows join as the main loop joins them; the host instruction is the last block.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history.extend([{"role": "user", "content": "First."}, {"role": "user", "content": "Second."}])
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-1] == {"role": "user", "content": "First.\n\nSecond.\n\nWrite the handoff."}
+        roles = [row["role"] for row in calls[1]["messages"]]
+        assert not any(a == b == "user" for a, b in zip(roles, roles[1:]))
+    finally:
+        client.close()
+
+
+def test_a_middleware_can_redact_a_trailing_user_row_joined_with_the_instruction(monkeypatch):
+    def redact(request=None, next_call=None, **context):
+        changed = copy.deepcopy(request)
+        changed["messages"][-1]["content"] = changed["messages"][-1]["content"].replace("SECRET", "[redacted]")
+        return next_call(changed)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history.append({"role": "user", "content": "The key is SECRET."})
+        _execution_middleware(monkeypatch, redact)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-1]["content"] == "The key is [redacted].\n\nWrite the handoff."
+    finally:
+        client.close()
+
+
+def test_a_middleware_that_changes_the_instruction_block_is_refused(monkeypatch):
+    def change(request=None, next_call=None, **context):
+        changed = copy.deepcopy(request)
+        changed["messages"][-1]["content"] = changed["messages"][-1]["content"].replace("handoff", "poem")
+        return next_call(changed)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history.append({"role": "user", "content": "Next."})
+        _execution_middleware(monkeypatch, change)
+        with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
             PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert len(calls) == 1
     finally:
