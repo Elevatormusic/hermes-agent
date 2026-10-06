@@ -130,6 +130,22 @@ def _same_row(wire, row):
     return calls(wire) == calls(row)
 
 
+# Fields that the main loop adds to a sent row apart from the transport conversion: the prompt caching marker.
+_TRANSPORT_FIELDS = frozenset({"cache_control"})
+
+
+def _no_extra_fields(wire, expected):
+    """The sent row and its tool calls have no field that the transport does not send for the stored row (a
+    provider control that a middleware added, for example): the model reads it."""
+    if set(wire) - set(expected) - _TRANSPORT_FIELDS:
+        return False
+    for call, want in zip(wire.get("tool_calls") or [], expected.get("tool_calls") or []):
+        if isinstance(call, dict) and isinstance(want, dict) and (set(call) - set(want) or (
+                isinstance(call.get("function"), dict) and set(call["function"]) - set(want.get("function") or {}))):
+            return False
+    return True
+
+
 def _same_replay_fields(wire, expected):
     """The sent row has the reasoning fields and thought signatures that the main loop replays for the stored
     row on this route. The provider reads them: a middleware that changed them made a prefix that the history
@@ -404,7 +420,7 @@ class PrefixRequest:
             raise PrefixRequestError("source_transform_unsupported")
         expected = ChatCompletionsTransport().convert_messages([_wire(row, copy_reasoning) for row in source],
                                                                model=agent.model, base_url=agent.base_url)
-        if not all(_same_replay_fields(wire, want) for wire, want in zip(rows, expected)):
+        if not all(_same_replay_fields(wire, want) and _no_extra_fields(wire, want) for wire, want in zip(rows, expected)):
             raise PrefixRequestError("source_transform_unsupported")
         from agent.model_metadata import estimate_request_tokens_rough
         # The server count of the captured request is exact; only the new rows are estimated.

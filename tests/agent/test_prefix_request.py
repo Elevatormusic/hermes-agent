@@ -920,3 +920,25 @@ def test_the_attempt_is_checked_again_at_the_send_seam(monkeypatch, change, reas
     finally:
         client.close()
 
+
+@pytest.mark.parametrize("field, accepted", [
+    ({"recipient": "x"}, False), ({"prefix": True}, False),
+    # Prompt caching marks rows with cache_control on some routes.
+    ({"cache_control": {"type": "ephemeral"}}, True),
+])
+def test_a_captured_row_with_an_extra_field_is_refused(field, accepted):
+    # A provider control that a middleware added changes what the model reads, without a change to the history.
+    agent, calls, ordinary, client, history = make_agent()
+    ordinary["messages"][1].update(field)
+    try:
+        ordinary_turn(agent, ordinary, history)
+        if accepted:
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 2
+        else:
+            with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+                PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 1
+    finally:
+        client.close()
+
