@@ -603,6 +603,26 @@ def test_appended_rows_keep_reasoning_details_on_a_replaying_route(base_url, kep
         client.close()
 
 
+def test_the_native_carrier_of_the_provider_profile_is_replayed(monkeypatch):
+    # The main transport replays the <provider>.native_assistant carrier that the provider profile declares,
+    # also on a route that does not replay other reasoning_details.
+    import providers
+    monkeypatch.setattr(providers, "get_provider_profile",
+                        lambda name: SimpleNamespace(native_reasoning_details_type="acme.native_assistant"))
+    agent, calls, ordinary, client, history = make_agent()
+    carrier = [{"type": "acme.native_assistant", "data": "n"}]
+    history[1]["reasoning_details"] = carrier
+    ordinary["messages"][2]["reasoning_details"] = carrier
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history[-1]["reasoning_details"] = carrier
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 2
+        assert calls[1]["messages"][-2].get("reasoning_details") == carrier
+    finally:
+        client.close()
+
+
 def _request_middleware(monkeypatch, callback):
     import hermes_cli.plugins as plugins
     manager = SimpleNamespace(

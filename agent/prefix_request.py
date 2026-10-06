@@ -15,6 +15,7 @@ reports cached tokens only when the server sends them.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -408,7 +409,13 @@ class PrefixRequest:
         # The main loop's transport rule: no call_id or response_item_id, extra_content only for Gemini, no name
         # on tool rows.
         from agent.transports.chat_completions import ChatCompletionsTransport
-        suffix = ChatCompletionsTransport().convert_messages(suffix, model=agent.model, base_url=agent.base_url)
+        # The provider profile of the main request: it can replay a native reasoning carrier on any route.
+        profile = None
+        with contextlib.suppress(Exception):
+            from providers import get_provider_profile
+            profile = get_provider_profile(agent.provider)
+        suffix = ChatCompletionsTransport().convert_messages(suffix, model=agent.model, base_url=agent.base_url,
+                                                             provider_profile=profile)
         body = _copy(capsule["body"])
         if (body.get("tool_choice") not in (None, "auto", "none") or body.get("n", 1) != 1
                 or any(key in body for key in _UNSUPPORTED_SETTINGS)):
@@ -422,7 +429,8 @@ class PrefixRequest:
         if len(rows) != len(source) or not all(_same_row(wire, row) for wire, row in zip(rows, source)):
             raise PrefixRequestError("source_transform_unsupported")
         expected = ChatCompletionsTransport().convert_messages([_wire(row, copy_reasoning) for row in source],
-                                                               model=agent.model, base_url=agent.base_url)
+                                                               model=agent.model, base_url=agent.base_url,
+                                                               provider_profile=profile)
         if not all(_same_replay_fields(wire, want) and _no_extra_fields(wire, want) for wire, want in zip(rows, expected)):
             raise PrefixRequestError("source_transform_unsupported")
         from agent.model_metadata import estimate_request_tokens_rough
