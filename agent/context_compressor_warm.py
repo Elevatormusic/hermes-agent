@@ -9,6 +9,7 @@ attempt.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,11 @@ _WARM_HANDOFF_TIMEOUT_S = 120.0
 # auto: hosted prompt caches expire after minutes without use. An older capture can mean a cold request that
 # reads the whole conversation at full price, so auto then keeps the auxiliary summary.
 WARM_HANDOFF_AUTO_MAX_AGE_S = 300.0
+# Compression stall fallback can overlap attempts on the same ContextCompressor. Keep the warm seam
+# attempt-local so one worker cannot consume or clear another worker's prefix request/focus/memory.
+_WARM_HANDOFF_ATTEMPT: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "hermes_warm_handoff_attempt", default=None
+)
 WARM_HANDOFF_INSTRUCTION = """\
 Stop the current task now. This request comes from the host program, not from the user. The host will replace \
 this conversation with a short handoff. After that, the system prompt and your handoff are the only record of this \
@@ -135,25 +141,29 @@ class WarmHandoffMixin:
     def _warm_handoff_text(self, has_user_turn: bool = True, focus_topic: Optional[str] = None) -> Optional[str]:
         """Use the one same-prefix request of this attempt. None means: make the normal aux call.
         ``has_user_turn`` and ``focus_topic`` are the values that the normal summary prompt uses."""
-        request, self._prefix_request = getattr(self, "_prefix_request", None), None
+        attempt = _WARM_HANDOFF_ATTEMPT.get()
+        if not isinstance(attempt, dict) or attempt.get("owner") is not self:
+            return None
+        request = attempt.get("request")
+        attempt["request"] = None
         if request is None:
             return None
         if not has_user_turn:
             # The summary check needs the no-user sentinel section, which the five-heading handoff has not.
-            self._last_warm_handoff = {"used": False, "reason": "skipped:no_user_turn"}
+            attempt["result"] = {"used": False, "reason": "skipped:no_user_turn"}
             logger.info("Compression warm handoff skipped (no_user_turn); using the auxiliary summary call")
             return None
         from agent.context_compressor import _memory_provider_section, _redact_compaction_text
         from agent.prefix_request import PrefixRequestError
 
         instruction = WARM_HANDOFF_INSTRUCTION
-        focus = focus_topic or getattr(self, "_prefix_focus", None)
+        focus = focus_topic or attempt.get("focus")
         if focus:
             instruction += "\nGive more detail to this topic: " + _redact_compaction_text(focus).strip() + "\n"
         # The same sanitized, data-framed block as the normal summary prompt.
-        instruction += _memory_provider_section(getattr(self, "_prefix_memory", "") or "")
+        instruction += _memory_provider_section(attempt.get("memory") or "")
         result = {"used": False, "reason": "", "elapsed_s": None, "prompt_tokens": None, "cache_read_tokens": None}
-        self._last_warm_handoff = result
+        attempt["result"] = result
         try:
             reply = request(instruction, timeout_s=_WARM_HANDOFF_TIMEOUT_S)
         except PrefixRequestError as error:
@@ -225,11 +235,15 @@ class WarmHandoffMixin:
         warm = skip is None
         if skip is not None and skip.startswith("auto:"):
             logger.info("Compression warm handoff skipped (%s); using the auxiliary summary call", skip)
-        self._prefix_request = prefix_request if warm else None
-        self._prefix_focus, self._prefix_memory = (focus_topic, memory_context) if warm else (None, "")
-        self._last_warm_handoff = None if warm else {"used": False, "reason": f"skipped:{skip}"}
+        attempt = {"owner": self, "request": prefix_request if warm else None,
+                   "focus": focus_topic if warm else None, "memory": memory_context if warm else "",
+                   "result": None if warm else {"used": False, "reason": f"skipped:{skip}"}}
+        token = _WARM_HANDOFF_ATTEMPT.set(attempt)
         try:
             return self._compress_messages(messages, current_tokens, focus_topic, force, memory_context,
                                            bypass_cooldown)
         finally:
-            self._prefix_request = None
+            _WARM_HANDOFF_ATTEMPT.reset(token)
+            # Publish diagnostics only after the attempt finishes. Overlapping workers keep independent live state;
+            # this field simply describes whichever attempt completed most recently.
+            self._last_warm_handoff = attempt["result"]
