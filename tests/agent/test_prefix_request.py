@@ -546,7 +546,8 @@ def test_the_stop_setting_is_not_sent():
 
 def test_capacity_is_checked_again_after_the_request_middleware(monkeypatch):
     def expand(request=None, **context):
-        request["messages"][-1]["content"] += " context" * 100_000
+        # The rows after the capture can change; the instruction (the last row) cannot.
+        request["messages"][-2]["content"] += " context" * 100_000
         return {"request": request}
     import hermes_cli.plugins as plugins
     manager = SimpleNamespace(
@@ -588,6 +589,85 @@ def test_appended_rows_keep_reasoning_details_on_a_replaying_route(base_url, kep
         history[-1]["reasoning_details"] = details
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert calls[1]["messages"][-2].get("reasoning_details") == (details if kept else None)
+    finally:
+        client.close()
+
+
+def _request_middleware(monkeypatch, callback):
+    import hermes_cli.plugins as plugins
+    manager = SimpleNamespace(
+        _middleware={"llm_request": [callback]}, has_middleware=lambda kind: kind == "llm_request",
+        invoke_middleware=lambda kind, **kwargs: [callback(**kwargs)] if kind == "llm_request" else [],
+        _report_hook_failure=lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+
+
+def _rewrite_prefix_row(request):
+    request["messages"][1]["content"] = "A different captured request."
+
+
+def _rewrite_tools(request):
+    request["tools"] = []
+
+
+def _rewrite_model(request):
+    request["model"] = "another-model"
+
+
+def _drop_instruction(request):
+    del request["messages"][-1]
+
+
+@pytest.mark.parametrize("rewrite", [_rewrite_prefix_row, _rewrite_tools, _rewrite_model, _drop_instruction])
+def test_a_request_middleware_rewrite_of_the_captured_part_falls_back(monkeypatch, rewrite):
+    def middleware(request=None, **context):
+        rewrite(request)
+        return {"request": request}
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _request_middleware(monkeypatch, middleware)
+        with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("in_place", [True, False])
+@pytest.mark.parametrize("rewrite", [_rewrite_prefix_row, _rewrite_tools, _rewrite_model, _drop_instruction])
+def test_an_execution_middleware_rewrite_of_the_captured_part_falls_back(monkeypatch, rewrite, in_place):
+    # The identity check runs inside _send, the last seam before the provider.
+    def middleware(request=None, next_call=None, **context):
+        if in_place:
+            rewrite(request)
+            return next_call()
+        changed = copy.deepcopy(request)
+        rewrite(changed)
+        return next_call(changed)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, middleware)
+        with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_an_execution_middleware_can_redact_the_rows_after_the_capture(monkeypatch):
+    def redact(request=None, next_call=None, **context):
+        changed = copy.deepcopy(request)
+        changed["messages"][-2]["content"] = "[redacted]"
+        return next_call(changed)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, redact)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-2]["content"] == "[redacted]"
+        assert calls[1]["messages"][:len(calls[0]["messages"])] == calls[0]["messages"]
     finally:
         client.close()
 

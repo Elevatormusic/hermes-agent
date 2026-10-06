@@ -15,6 +15,7 @@ reports cached tokens only when the server sends them.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -128,6 +129,18 @@ def _dump(response):
     """A comparable copy of an SDK response."""
     dump = getattr(response, "model_dump", None)
     return dump() if callable(dump) else repr(response)
+
+
+def _same_request(base, request, count):
+    """The sent request keeps what the cache and the summary depend on: every setting (model, tools, sampling),
+    the first ``count`` messages (the captured request), and the last message (the host instruction). Only the
+    rows after the capture can differ, for example after a redaction."""
+    return (isinstance(request, dict) and isinstance(request.get("messages"), list)
+            and len(request["messages"]) > count
+            and {k: v for k, v in request.items() if k != "messages"}
+            == {k: v for k, v in base.items() if k != "messages"}
+            and request["messages"][:count] == base["messages"][:count]
+            and request["messages"][-1] == base["messages"][-1])
 
 
 def _route(agent):
@@ -385,8 +398,7 @@ class PrefixRequest:
         # The captured request went through llm_request middleware already: a change to it (for example, an added
         # system row) would apply twice and change the cached prefix. The rows after it can change.
         count = len(self._capsule["body"]["messages"])
-        if ({k: v for k, v in changed.items() if k != "messages"} != {k: v for k, v in body.items() if k != "messages"}
-                or changed["messages"][:count] != body["messages"][:count]):
+        if not _same_request(body, changed, count):
             raise PrefixRequestError("middleware_rewrite")
         body = changed
         # A request middleware can add text to the rows after the capture: check the size again.
@@ -400,8 +412,14 @@ class PrefixRequest:
             started = time.monotonic()
 
             sent = []
+            # A copy that no middleware can change in place: the request identity check below compares with it.
+            base = copy.deepcopy(body)
 
             def _send(request):
+                # The last seam before the provider: an execution middleware can have changed the request. The
+                # captured part, the settings, and the instruction must be the ones that the checks above accepted.
+                if not _same_request(base, request, count):
+                    raise PrefixRequestError("middleware_rewrite")
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
                 response = client.chat.completions.create(
                     model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
@@ -409,7 +427,9 @@ class PrefixRequest:
                 return response
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
-                response = run_llm_execution_middleware(body, _send, original_request=body, **context)
+                response = run_llm_execution_middleware(body, _send, original_request=base, **context)
+            except PrefixRequestError:
+                raise
             except Exception as error:
                 raise PrefixRequestError("provider_error") from error
             # Only the server's own reply: a middleware that skipped the request or changed its reply would make
