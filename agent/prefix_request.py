@@ -1,6 +1,6 @@
 """One same-prefix request for context compaction.
 
-The host keeps the last completed Chat Completions request of the session. A
+The host keeps the last completed Chat Completions or Anthropic Messages request of the session. A
 compaction attempt can send that request once more with the history rows that
 came after it (the reply, tool results, a new user message) and one appended
 user message. The system prompt, tools, tool choice, reasoning settings, and
@@ -248,6 +248,68 @@ def final_body(kwargs):
     return _copy(_merged(kwargs))
 
 
+_ANTHROPIC_MESSAGES = "anthropic_messages"
+# Anthropic Messages settings that a replay cannot keep as they are.
+_ANTHROPIC_UNSUPPORTED_SETTINGS = ("container", "mcp_servers", "context_management", "compaction")
+# A thinking request counts its reasoning in max_tokens: the handoff gets more room there.
+_HANDOFF_THINKING_MAX_TOKENS = 32768
+
+
+def _is_anthropic(agent):
+    return getattr(agent, "api_mode", None) == _ANTHROPIC_MESSAGES
+
+
+def _anthropic_body(kwargs):
+    """The Anthropic ``messages.create`` arguments that the SDK sends. A per-request ``anthropic-beta`` header
+    (fast mode) is part of the request and is replayed as it is; request-local queries are not supported."""
+    if kwargs.get("extra_query"):
+        raise PrefixRequestError("request_options_unsupported")
+    headers, extra = kwargs.get("extra_headers"), kwargs.get("extra_body")
+    if headers is not None and (type(headers) is not dict
+                                or not all(type(k) is str and type(v) is str for k, v in headers.items())):
+        raise PrefixRequestError("request_options_unsupported")
+    if extra is not None and type(extra) is not dict:
+        raise PrefixRequestError("request_options_unsupported")
+    return {k: v for k, v in kwargs.items() if k not in {"timeout", "extra_query"}}
+
+
+def _route_body(agent, kwargs):
+    """The request body of this route: Chat Completions merges ``extra_body``; Anthropic keeps its arguments."""
+    return _anthropic_body(kwargs) if _is_anthropic(agent) else _merged(kwargs)
+
+
+def _without_cache_control(value):
+    """A copy without prompt-cache markers, at any depth (tool_result content carries them too)."""
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+
+def _comparable(row):
+    """An Anthropic message as the model reads it: no prompt-cache marker, and the shapes that the cache
+    decoration makes (a string turned into a text block, a text split before a marker) joined back."""
+    clean = {k: _without_cache_control(v) for k, v in row.items() if k != "cache_control"}
+    content = clean.get("content")
+    parts = [{"type": "text", "text": content}] if isinstance(content, str) else content
+    if not isinstance(parts, list):
+        return clean
+    joined = []
+    for part in parts:
+        last = joined[-1] if joined else None
+        if isinstance(last, dict) and isinstance(part, dict) and _plain_text(part) and _plain_text(last):
+            joined[-1] = {"type": "text", "text": str(last.get("text")) + str(part.get("text"))}
+        else:
+            joined.append(part)
+    clean["content"] = joined
+    return clean
+
+
+def _plain_text(part):
+    return isinstance(part, dict) and part.get("type") == "text" and set(part) == {"type", "text"}
+
+
 def _row_digests(messages):
     return [_digest(_key(row)) for row in _source(messages)]
 
@@ -262,7 +324,7 @@ def begin_capture(agent, kwargs):
     if type(source) is not list:
         return
     try:
-        body = final_body(kwargs)
+        body = _copy(_route_body(agent, kwargs))
         agent._prefix_capture = {"source": _row_digests(source), "route": _route(agent), "body": body,
                                  "body_digest": _digest(body)}
     except (PrefixRequestError, TypeError, ValueError):
@@ -276,7 +338,7 @@ def capture_response(agent, kwargs, response):
         return response
     capture = getattr(agent, "_prefix_capture", None)
     try:
-        if capture is None or _digest(_merged(kwargs)) != capture["body_digest"]:
+        if capture is None or _digest(_route_body(agent, kwargs)) != capture["body_digest"]:
             return response
         object.__setattr__(response, "_hermes_prefix_capture", capture)
     except (PrefixRequestError, TypeError, ValueError, AttributeError):
@@ -284,12 +346,38 @@ def capture_response(agent, kwargs, response):
     return response
 
 
+def _anthropic_reply(response):
+    """(finish_reason, message) of an Anthropic Messages response, in the Chat Completions form that the rest of
+    this module reads: the text blocks joined (thinking blocks are not reply text), ``tool_calls`` for tool_use
+    blocks, and the stop reason mapped as the transport maps it for a main request."""
+    from types import SimpleNamespace
+
+    from agent.transports.anthropic import AnthropicTransport
+
+    blocks = getattr(response, "content", None)
+    if not isinstance(blocks, (list, tuple)):
+        return None, None
+    kind = lambda block: getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")  # noqa: E731
+    texts = [getattr(b, "text", None) if not isinstance(b, dict) else b.get("text") for b in blocks if kind(b) == "text"]
+    calls = [b for b in blocks if kind(b) in ("tool_use", "server_tool_use")]
+    stop = getattr(response, "stop_reason", None)
+    stop_map = dict(getattr(AnthropicTransport, "_STOP_REASON_MAP", None) or {})
+    finish = stop_map.get(stop, stop) if isinstance(stop, str) else None
+    message = SimpleNamespace(role=getattr(response, "role", None),
+                              content="\n".join(t for t in texts if isinstance(t, str)) if texts else None,
+                              tool_calls=calls or None, function_call=None, refusal=None)
+    return finish, message
+
+
 def _single_reply(response):
     """Return (finish_reason, message) of a one-choice response, else (None, None). The finish reason is the
-    lowercase contract value (``STOP`` is ``stop``), as the transport gives it for a main request."""
+    lowercase contract value (``STOP`` is ``stop``), as the transport gives it for a main request. An Anthropic
+    Messages response (no ``choices``) is read through ``_anthropic_reply``."""
     from agent.message_sanitization import normalize_finish_reason
 
     choices = getattr(response, "choices", None)
+    if choices is None and getattr(response, "type", None) == "message" and hasattr(response, "stop_reason"):
+        return _anthropic_reply(response)
     if not isinstance(choices, (list, tuple)) or len(choices) != 1:
         return None, None
     return normalize_finish_reason(getattr(choices[0], "finish_reason", None)), getattr(choices[0], "message", None)
@@ -314,9 +402,16 @@ def _usage(response):
     usage = getattr(response, "usage", None)
     raw = usage.model_dump(exclude_none=True) if hasattr(usage, "model_dump") else usage
     raw = raw if isinstance(raw, dict) else {}
+    count = lambda value: value if type(value) is int and value >= 0 else None  # noqa: E731
+    if "input_tokens" in raw and "prompt_tokens" not in raw:
+        # Anthropic Messages: input_tokens excludes the prompt tokens read from or written to the cache.
+        fresh, read, written = (count(raw.get(key)) for key in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        prompt = None if fresh is None else fresh + (read or 0) + (written or 0)
+        return {"prompt_tokens": prompt, "completion_tokens": count(raw.get("output_tokens")),
+                "cache_read_tokens": read}
     details = raw.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
-    count = lambda value: value if type(value) is int and value >= 0 else None  # noqa: E731
     # A missing cached-token count is unknown, not zero.
     return {"prompt_tokens": count(raw.get("prompt_tokens")), "completion_tokens": count(raw.get("completion_tokens")),
             "cache_read_tokens": count(cached)}
@@ -388,10 +483,9 @@ class PrefixRequest:
         if pending:
             raise PrefixRequestError("messages_unsupported")
 
-    def _request(self, instruction):
-        agent, capsule = self._agent, self._capsule
-        if agent.api_mode != "chat_completions" or agent.provider == "moa":
-            raise PrefixRequestError("api_mode_unsupported")
+    def _captured_history(self):
+        """The capture of this attempt, checked against the route and the history: (row count, capture)."""
+        capsule = self._capsule
         if capsule is None:
             raise PrefixRequestError("no_capture")
         if capsule["route"] != self._route:
@@ -402,6 +496,94 @@ class PrefixRequest:
         count = len(capsule["source"])
         if len(self._source) < count or _row_digests(self._source[:count]) != capsule["source"]:
             raise PrefixRequestError("history_changed")
+        return count, capsule
+
+    def _anthropic_render(self, rows):
+        """The Anthropic messages that the main loop's request builder makes from these history rows: the same
+        converter, the same Claude Code (OAuth) tool naming, the same route settings."""
+        agent = self._agent
+        rows = [_sent(row) for row in _copy(rows)]
+        prepare = getattr(agent, "_prepare_anthropic_messages_for_api", None)
+        rows = prepare(rows) if callable(prepare) else rows
+        preserve_dots = getattr(agent, "_anthropic_preserve_dots", None)
+        compressor = getattr(agent, "context_compressor", None)
+        kwargs = agent._get_transport().build_kwargs(
+            model=agent.model, messages=rows, tools=agent.tools, max_tokens=None,
+            reasoning_config=getattr(agent, "reasoning_config", None),
+            is_oauth=bool(getattr(agent, "_is_anthropic_oauth", False)),
+            preserve_dots=bool(preserve_dots()) if callable(preserve_dots) else False,
+            context_length=getattr(compressor, "context_length", None) or None,
+            base_url=getattr(agent, "_anthropic_base_url", None),
+            drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
+        return kwargs["messages"]
+
+    def _anthropic_request(self, instruction):
+        """The Anthropic Messages form of the same-prefix request. The captured messages stay byte for byte as
+        they were sent, with their ``cache_control`` breakpoints, so the server reads them from its prompt cache.
+        The rows after the capture follow without a breakpoint, then the instruction as the last text block."""
+        count, capsule = self._captured_history()
+        body = _copy(capsule["body"])
+        if (body.get("tool_choice") not in (None, {"type": "auto"}, {"type": "none"})
+                or any(key in body for key in _ANTHROPIC_UNSUPPORTED_SETTINGS)):
+            raise PrefixRequestError("settings_unsupported")
+        captured = body.get("messages")
+        if (type(captured) is not list or not captured
+                or any(type(row) is not dict or row.get("role") not in ("user", "assistant") for row in captured)):
+            raise PrefixRequestError("messages_unsupported")
+        # The body must be the rendering of exactly the stored rows: a hook or middleware that rewrote a row would
+        # make the handoff summarize text that is not in the history it replaces. The rendering of the whole
+        # history must start with the same messages (no merge across the capture boundary).
+        try:
+            prefix, rendered = self._anthropic_render(self._source[:count]), self._anthropic_render(self._source)
+        except PrefixRequestError:
+            raise
+        except Exception as error:  # health: allow BLE001 -- a rendering failure only means no warm request
+            raise PrefixRequestError("source_transform_unsupported") from error
+        want = [_comparable(row) for row in captured]
+        if ([_comparable(row) for row in prefix] != want
+                or [_comparable(row) for row in rendered[:len(captured)]] != want):
+            raise PrefixRequestError("source_transform_unsupported")
+        messages = [*captured, *_without_cache_control(rendered[len(captured):])]
+        block = {"type": "text", "text": instruction}
+        last = messages[-1]
+        if len(messages) > len(captured) and last.get("role") == "user":
+            # Join the instruction to the last new user row (tool results, a new message); never to a captured row.
+            content = last.get("content")
+            content = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+            messages[-1] = {**last, "content": [*content, block]}
+        else:
+            messages.append({"role": "user", "content": [block]})
+        body["messages"] = messages
+        body.pop("stream", None)
+        # A stop sequence of the main request could cut the handoff after its headings.
+        body.pop("stop_sequences", None)
+        # The reply limit of the main request is for another task; the handoff gets its own. A thinking request
+        # counts its reasoning in the same limit. The limit does not take part in the prompt cache.
+        thinking = body.get("thinking")
+        limit = _HANDOFF_MAX_TOKENS
+        if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive"):
+            budget = thinking.get("budget_tokens")
+            limit = max(_HANDOFF_THINKING_MAX_TOKENS,
+                        (budget if type(budget) is int and budget > 0 else 0) + _HANDOFF_MAX_TOKENS)
+        current = body.get("max_tokens")
+        body["max_tokens"] = min(current, limit) if type(current) is int and current > 0 else limit
+        from agent.model_metadata import estimate_request_tokens_rough
+        reported = (capsule.get("usage") or {}).get("prompt_tokens")
+        self._prefix_tokens = reported or estimate_request_tokens_rough(
+            [*([{"role": "system", "content": json.dumps(body.get("system"))}] if body.get("system") else []),
+             *captured], tools=body.get("tools"))
+        self._check_capacity(body, len(captured))
+        return body
+
+    def _request(self, instruction):
+        agent = self._agent
+        if agent.provider == "moa":
+            raise PrefixRequestError("api_mode_unsupported")
+        if _is_anthropic(agent):
+            return self._anthropic_request(instruction)
+        if agent.api_mode != "chat_completions":
+            raise PrefixRequestError("api_mode_unsupported")
+        count, capsule = self._captured_history()
         source = self._source[:count]
         copy_reasoning = getattr(agent, "_copy_reasoning_content_for_api", None)
         suffix = [_wire(row, copy_reasoning) for row in self._source[len(source):]]
@@ -452,6 +634,10 @@ class PrefixRequest:
         self._check_capacity(body, len(capsule["body"]["messages"]))
         return body
 
+    def _remaining_s(self):
+        """Seconds left before the deadline of this attempt (set in ``__call__`` before any send)."""
+        return (self._deadline if self._deadline is not None else time.monotonic()) - time.monotonic()
+
     def _check_capacity(self, body, count):
         """The measured (or estimated) captured prefix, the estimated rows after it, and the reply reserve must
         fit in the context window."""
@@ -497,11 +683,20 @@ class PrefixRequest:
         body = changed
         # A request middleware can add text to the rows after the capture: check the size again.
         self._check_capacity(body, count)
-        client = agent._create_request_openai_client(reason="context_prefix_request", api_kwargs=body)
+        anthropic = _is_anthropic(agent)
+        if anthropic:
+            client = agent._create_request_anthropic_client(reason="context_prefix_request")
+        else:
+            client = agent._create_request_openai_client(reason="context_prefix_request", api_kwargs=body)
         try:
-            from openai import OpenAI
-            if not isinstance(client, OpenAI) or client.max_retries != 0:
-                raise PrefixRequestError("plain_sdk_required")
+            if anthropic:
+                # The SDK must not retry on its own: one attempt, cancellable through the deadline.
+                if getattr(client, "max_retries", None) != 0:
+                    raise PrefixRequestError("plain_sdk_required")
+            else:
+                from openai import OpenAI
+                if not isinstance(client, OpenAI) or client.max_retries != 0:
+                    raise PrefixRequestError("plain_sdk_required")
             self._check()
             started = time.monotonic()
 
@@ -516,9 +711,17 @@ class PrefixRequest:
                     raise PrefixRequestError("middleware_rewrite")
                 # An execution middleware can run after a cancel, a route switch, or the deadline: check again.
                 self._check()
-                # The final body travels in extra_body; the SDK merges it after its typed fields.
-                response = client.chat.completions.create(
-                    model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
+                if anthropic:
+                    # The main loop's Messages call (streamed when the route streams); one final Message.
+                    from agent.anthropic_adapter import create_anthropic_message
+                    kwargs = {**copy.deepcopy(request), "timeout": self._remaining_s()}
+                    response = create_anthropic_message(
+                        client, kwargs, log_prefix=getattr(agent, "log_prefix", ""),
+                        prefer_stream=not bool(getattr(agent, "_disable_streaming", False)))
+                else:
+                    # The final body travels in extra_body; the SDK merges it after its typed fields.
+                    response = client.chat.completions.create(
+                        model=request["model"], messages=[], extra_body=request, timeout=self._remaining_s())
                 sent.append((response, _dump(response)))
                 return response
             try:
@@ -535,7 +738,10 @@ class PrefixRequest:
             elapsed = time.monotonic() - started
             self._check()
         finally:
-            agent._close_request_openai_client(client, reason="context_prefix_request")
+            if anthropic:
+                agent._close_request_anthropic_client(client, reason="context_prefix_request")
+            else:
+                agent._close_request_openai_client(client, reason="context_prefix_request")
         finish, message = _single_reply(response)
         if message is None:
             raise PrefixRequestError("incomplete_response")

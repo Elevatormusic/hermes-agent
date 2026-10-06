@@ -782,8 +782,9 @@ compression:
   # Warm handoff: off | on | auto (default: off). A compaction first sends the
   # last main-model request again, plus the rows after it and one instruction,
   # so the main model writes the summary on its cached prompt. A server with
-  # prefix caching (vLLM, SGLang, llama.cpp, LM Studio, hosted prompt caches)
-  # then reads only the new rows instead of the whole conversation. "auto" uses
+  # prefix caching (vLLM, SGLang, llama.cpp, LM Studio, hosted prompt caches,
+  # Anthropic Messages including Claude Code OAuth) then reads only the new rows
+  # instead of the whole conversation. "auto" uses
   # it only when auxiliary.compression resolves to the main model and the
   # server reported cached tokens for a request less than 5 minutes old (an
   # expired cache would make it a full-price read). Any failure falls back to
