@@ -754,3 +754,49 @@ def test_a_provider_spelling_of_the_finish_reason_is_normalized():
     finally:
         client.close()
 
+
+@pytest.mark.parametrize("sent, accepted", [
+    ("Do not 0 data", False), ("0 data now", False), ("0 data\n\n[context]", True), ("[context]\n\n0 data", True),
+])
+def test_text_added_on_the_same_line_as_a_stored_row_is_refused(sent, accepted):
+    # The host adds request-time context as separate lines. Text on the same line can change the meaning.
+    agent, calls, ordinary, client, history = make_agent()
+    history[0]["content"] = "0 data"
+    ordinary["messages"][1]["content"] = sent
+    try:
+        ordinary_turn(agent, ordinary, history)
+        if accepted:
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+            assert len(calls) == 2
+        else:
+            with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+                PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_web_search_is_not_sent_with_the_handoff():
+    agent, calls, ordinary, client, history = make_agent()
+    ordinary["web_search_options"] = {}
+    try:
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert "web_search_options" in calls[0] and "web_search_options" not in calls[1]
+    finally:
+        client.close()
+
+
+def test_the_capacity_check_reserves_the_larger_reply_limit():
+    # 60,000 measured prompt tokens in a 65,536 window: the 6,000-token max_completion_tokens does not fit, even
+    # with the smaller max_tokens (2,048) next to it. A server can honor either limit.
+    agent, calls, ordinary, client, history = make_agent(usage={"prompt_tokens": 60_000, "completion_tokens": 5,
+                                                                "total_tokens": 60_005})
+    ordinary["max_completion_tokens"] = 6_000
+    try:
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="capacity"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+

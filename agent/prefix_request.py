@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import logging
 import math
 import threading
@@ -111,6 +112,14 @@ def _arguments(value):
     return "json", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
+def _in_whole_lines(stored, sent):
+    """The stored text is in the sent text as whole lines. The host adds request-time context as separate lines
+    (``"\n\n" + context``); text on the same line can change the meaning ("Delete A" to "Do not Delete A")."""
+    if not stored:
+        return True
+    return re.search(r"(?:^|\n)[ \t]*" + re.escape(stored) + r"[ \t]*(?:\n|$)", sent) is not None
+
+
 def _same_row(wire, row):
     """The sent row carries the stored row: the same shape, the same name (the transport drops ``name`` from
     tool rows only), the stored text (``api_content`` when the row has it) inside the sent text (the host adds
@@ -121,7 +130,7 @@ def _same_row(wire, row):
         return False
     if wire.get("name") != row.get("name") and not (wire.get("name") is None and row.get("role") == "tool"):
         return False
-    if _text(_sent(row).get("content")).strip() not in _text(wire.get("content")):
+    if not _in_whole_lines(_text(_sent(row).get("content")).strip(), _text(wire.get("content"))):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
@@ -378,6 +387,8 @@ class PrefixRequest:
         body.pop("stream_options", None)
         # A stop sequence of the main request could cut the handoff after its headings.
         body.pop("stop", None)
+        # A web search costs a search and can bring text that is not in the conversation into the handoff.
+        body.pop("web_search_options", None)
         # The reply limit of the main request is for another task: a small one cuts the handoff, a large one
         # reserves space that the handoff does not need. Keep the field that the route uses.
         for key in ("max_tokens", "max_completion_tokens"):
@@ -392,7 +403,9 @@ class PrefixRequest:
         fit in the context window."""
         from agent.model_metadata import estimate_messages_tokens_rough
         limit = int(getattr(self._agent.context_compressor, "context_length", 0) or 0)
-        reserve = body.get("max_tokens") or body.get("max_completion_tokens") or _DEFAULT_OUTPUT_RESERVE
+        # A server can honor either reply limit: reserve the larger one.
+        limits = [body.get(key) for key in ("max_tokens", "max_completion_tokens")]
+        reserve = max([value for value in limits if type(value) is int and value > 0] or [_DEFAULT_OUTPUT_RESERVE])
         if limit <= 0 or self._prefix_tokens + estimate_messages_tokens_rough(body["messages"][count:]) + reserve > limit:
             raise PrefixRequestError("capacity")
 
