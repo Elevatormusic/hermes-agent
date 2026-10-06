@@ -1,6 +1,7 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { deAuxTasks } from './de_aux_tasks'
+import { deCompressionFieldDescriptions, deCompressionFieldLabels } from './de_compression'
 import { deModelMenu } from './de_model_menu'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introDe } from './intro-de'
@@ -1454,21 +1455,7 @@ export const deOverrides = {
         userCharLimit: 'Profil-Budget',
         provider: 'Gedächtnis-Anbieter'
       },
-      context: {
-        engine: 'Kontext-Engine'
-      },
-      compression: {
-        enabled: 'Auto-Kompression',
-        threshold: 'Kompression-Schwelle',
-        codexGpt55Autoraise: 'Automatische Codex-Komprimierungsanhebung',
-        targetRatio: 'Kompression-Ziel',
-        protectLastN: 'Geschützte letzte Nachrichten'
-      },
-      auxiliary: {
-        compression: {
-          timeout: 'Timeout des Komprimierungsmodells (s)'
-        }
-      },
+      ...deCompressionFieldLabels,
       delegation: {
         model: 'Subagent-Modell',
         provider: 'Subagent-Anbieter',
@@ -1530,19 +1517,7 @@ export const deOverrides = {
         memoryEnabled: 'Dauerhafte Erinnerungen speichern, die zukünftigen Sessions helfen können.',
         userProfileEnabled: 'Ein kompaktes Profil der Benutzerpräferenzen pflegen.'
       },
-      context: {
-        engine: 'Strategie zur Verwaltung langer Gespräche nahe der Kontextgrenze.'
-      },
-      compression: {
-        enabled: 'Älteren Kontext zusammenfassen, wenn Gespräche groß werden.',
-        codexGpt55Autoraise: 'Komprimierung bei unterstützten ChatGPT-Codex-OAuth-Modellen auf 85 % anheben.'
-      },
-      auxiliary: {
-        compression: {
-          timeout:
-            'Sekunden, die pro Aufruf auf das Hilfsmodell für Komprimierung gewartet wird (Standard 120). Für langsame lokale Modelle erhöhen.'
-        }
-      },
+      ...deCompressionFieldDescriptions,
       voice: {
         autoTts: 'Assistentenantworten automatisch vorlesen.',
         voiceChatMode:

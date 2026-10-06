@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 from agent.error_classifier import FailoverReason
 from agent.agent_runtime_helpers import _INTERRUPTED_PLACEHOLDER
 from agent.message_metadata import append_message
+from agent.prefix_request import begin_capture, capture_response, publish_response
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.turn_failure_copy import site_copy, stamp_failure
 
@@ -92,13 +93,15 @@ def perform_api_call(
                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                 sanitize_harmony_tokens=agent._is_codex_backend(),
             )
+        # Opt-in (context engine ``wants_prefix_request``): keep the final body of this physical call.
+        begin_capture(agent, next_api_kwargs)
         if _use_streaming:
-            return agent._interruptible_streaming_api_call(
+            return capture_response(agent, next_api_kwargs, agent._interruptible_streaming_api_call(
                 next_api_kwargs, on_first_delta=_stop_spinner
-            )
+            ))
         from agent import relay_llm
 
-        return relay_llm.execute(
+        return capture_response(agent, next_api_kwargs, relay_llm.execute(
             next_api_kwargs,
             agent._interruptible_api_call,
             session_id=str(agent.session_id or ""),
@@ -117,7 +120,7 @@ def perform_api_call(
                 "retry_count": retry_count,
             },
             defer_logical_completion=True,
-        )
+        ))
 
     from hermes_cli.middleware import run_llm_execution_middleware
 
@@ -154,6 +157,7 @@ def perform_api_call(
         else:
             interrupted = True
         return _verdict("break")
+    publish_response(agent, response)
     return _verdict("fallthrough")
 
 

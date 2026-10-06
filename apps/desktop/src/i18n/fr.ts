@@ -2,6 +2,7 @@ import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { frAuxTasks } from './fr_aux_tasks'
+import { frCompressionFieldDescriptions, frCompressionFieldLabels } from './fr_compression'
 import { frModelMenu } from './fr_model_menu'
 import { introFr } from './intro-fr'
 
@@ -1458,21 +1459,7 @@ export const frOverrides = {
         userCharLimit: 'Budget profil',
         provider: 'Fournisseur de mémoire'
       },
-      context: {
-        engine: 'Moteur de contexte'
-      },
-      compression: {
-        enabled: 'Auto-compression',
-        threshold: 'Seuil de compression',
-        codexGpt55Autoraise: 'Relèvement automatique de la compression Codex',
-        targetRatio: 'Objectif de compression',
-        protectLastN: 'Messages récents protégés'
-      },
-      auxiliary: {
-        compression: {
-          timeout: 'Délai du modèle de compression (s)'
-        }
-      },
+      ...frCompressionFieldLabels,
       delegation: {
         model: 'Modèle sous-agent',
         provider: 'Fournisseur sous-agent',
@@ -1535,19 +1522,7 @@ export const frOverrides = {
         memoryEnabled: 'Sauvegarder des mémoires durables pouvant aider les sessions futures.',
         userProfileEnabled: 'Maintenir un profil compact des préférences utilisateur.'
       },
-      context: {
-        engine: 'Stratégie pour gérer les longues conversations proches de la limite de contexte.'
-      },
-      compression: {
-        enabled: 'Résumer le contexte ancien quand les conversations grossissent.',
-        codexGpt55Autoraise: 'Relever la compression à 85 % pour les modèles ChatGPT Codex OAuth pris en charge.'
-      },
-      auxiliary: {
-        compression: {
-          timeout:
-            'Secondes d’attente du modèle de compression auxiliaire par appel (120 par défaut). Augmentez pour les modèles locaux lents.'
-        }
-      },
+      ...frCompressionFieldDescriptions,
       voice: {
         autoTts: "Lit automatiquement les réponses de l'assistant à voix haute.",
         voiceChatMode:
