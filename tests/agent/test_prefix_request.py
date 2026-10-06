@@ -686,6 +686,24 @@ def test_an_execution_middleware_rewrite_of_the_captured_part_falls_back(monkeyp
         client.close()
 
 
+@pytest.mark.parametrize("rewrite", [_rewrite_prefix_row, _rewrite_tools, _rewrite_model])
+def test_execution_middleware_cannot_change_the_validation_baseline(monkeypatch, rewrite):
+    def middleware(request=None, original_request=None, next_call=None, **context):
+        rewrite(request)
+        rewrite(original_request)
+        return next_call()
+
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, middleware)
+        with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
 def test_an_execution_middleware_can_redact_the_rows_after_the_capture(monkeypatch):
     def redact(request=None, next_call=None, **context):
         changed = copy.deepcopy(request)

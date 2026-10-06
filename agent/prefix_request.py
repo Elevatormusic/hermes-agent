@@ -531,7 +531,8 @@ class PrefixRequest:
                 return response
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
-                response = run_llm_execution_middleware(body, _send, original_request=base, **context)
+                response = run_llm_execution_middleware(
+                    body, _send, original_request=copy.deepcopy(base), **context)
             except PrefixRequestError:
                 raise
             except Exception as error:
