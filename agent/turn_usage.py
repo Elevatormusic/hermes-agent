@@ -1,11 +1,8 @@
-"""Per-response usage accounting for the conversation turn loop.
+"""Record usage from each response in the conversation turn loop.
 
-After every successful model API call, ``record_response_usage`` folds ``response.usage``
-into: the context compressor (``update_from_response`` + the compression-budget rearm
-latch), the usage anchor for display/compression math, per-session token/cost counters,
-the state.db token-delta queue, and the observability log line. MoA sessions additionally
-fold advisor fan-out usage into the reported counts and price the aggregator at its REAL
-model/provider. Logger name stays ``agent.conversation_loop`` for caplog parity.
+Acting usage measures context. Session totals include acting and advisor usage.
+Queue costs and token counts before context callbacks. Use the acting model's
+slot to price MoA requests. Keep the logger name for existing log checks.
 """
 
 from __future__ import annotations
@@ -17,9 +14,15 @@ from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
-from agent.usage_pricing import CanonicalUsage, CostResult, estimate_usage_cost, normalize_usage
+from agent.usage_pricing import CanonicalUsage, CostResult, estimate_usage_cost, normalize_usage, with_served_service_tier
 
 logger = logging.getLogger("agent.conversation_loop")
+
+
+def _agent_session_source(agent: Any) -> str:
+    """Use the agent's source if accounting must create the session row."""
+    from agent.session_source import session_source_for
+    return session_source_for(getattr(agent, "platform", None))
 
 
 @dataclass
@@ -63,6 +66,37 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
+def _record_usage_cost(agent, aggregator_usage, moa_client, reference_cost, has_acting_usage):
+    """Price the acting model and add advisor costs from their own models."""
+    model, provider, base_url = agent.model, agent.provider, agent.base_url
+    slot = getattr(moa_client, "last_aggregator_slot", None) if moa_client is not None else None
+    if slot and slot.get("model"):
+        model = slot["model"]
+        provider = slot.get("provider") or agent.provider
+        base_url = slot.get("base_url") or agent.base_url
+    result = (
+        estimate_usage_cost(
+            model, aggregator_usage, provider=provider,
+            base_url=base_url, api_key=getattr(agent, "api_key", ""),
+        ) if has_acting_usage else CostResult(None, "unknown", "none", "Acting usage unavailable")
+    )
+    delta = None
+    if result.amount_usd is not None:
+        delta = float(result.amount_usd)
+        agent.session_estimated_cost_usd += delta
+    if reference_cost is not None:
+        try:
+            advisor_cost = float(reference_cost)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            advisor_cost = None
+        if advisor_cost is not None:
+            agent.session_estimated_cost_usd += advisor_cost
+            delta = (delta or 0.0) + advisor_cost
+    agent.session_cost_status = result.status
+    agent.session_cost_source = result.source
+    return result, delta
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: List[Dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
@@ -81,7 +115,8 @@ def record_response_usage(
     response_usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     has_acting_usage = bool(response_usage)
     aggregator_usage = (
-        normalize_usage(response_usage, provider=agent.provider, api_mode=agent.api_mode)
+        with_served_service_tier(
+            normalize_usage(response_usage, provider=agent.provider, api_mode=agent.api_mode), response)
         if has_acting_usage else CanonicalUsage()
     )
     # Advisor spend and traces belong to this attempt even when acting usage is absent.
@@ -137,37 +172,9 @@ def record_response_usage(
                 from agent.nous_wire import maybe_switch_wire_after_first_response
                 maybe_switch_wire_after_first_response(agent, response, agent.session_api_calls)
 
-        # MoA: agent.model/provider are the virtual preset/"moa" with no pricing entry, silently
-        # dropping aggregator spend. Price at the REAL model/provider from the aggregator slot.
-        _agg_cost_model, _agg_cost_provider, _agg_cost_base_url = agent.model, agent.provider, agent.base_url
-        _agg_slot = getattr(_moa_client, "last_aggregator_slot", None) if _moa_client is not None else None
-        if _agg_slot and _agg_slot.get("model"):
-            _agg_cost_model = _agg_slot["model"]
-            _agg_cost_provider = _agg_slot.get("provider") or agent.provider
-            _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
-        cost_result = (
-            estimate_usage_cost(
-                _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
-                base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
-            ) if has_acting_usage else CostResult(None, "unknown", "none", "Acting usage unavailable")
+        cost_result, _cost_delta = _record_usage_cost(
+            agent, aggregator_usage, _moa_client, _moa_ref_cost, has_acting_usage,
         )
-        # Cost delta = aggregator + MoA advisor cost (already priced per-advisor at each
-        # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
-        # token counts.
-        _cost_delta = None
-        if cost_result.amount_usd is not None:
-            _cost_delta = float(cost_result.amount_usd)
-            agent.session_estimated_cost_usd += _cost_delta
-        if _moa_ref_cost is not None:
-            try:
-                _moa_cost = float(_moa_ref_cost)
-            except (TypeError, ValueError):  # pragma: no cover - defensive
-                _moa_cost = None
-            if _moa_cost is not None:
-                agent.session_estimated_cost_usd += _moa_cost
-                _cost_delta = (_cost_delta or 0.0) + _moa_cost
-        agent.session_cost_status = cost_result.status
-        agent.session_cost_source = cost_result.source
 
         # Persist per-call token deltas for any session_id so non-CLI runs can't lose
         # accounting; gateway/session-store writes use absolute totals and safely overwrite
@@ -181,6 +188,7 @@ def record_response_usage(
                     agent._ensure_db_session()
                 agent._session_db.queue_token_counts(
                     agent.session_id,
+                    source=_agent_session_source(agent),
                     input_tokens=canonical_usage.input_tokens,
                     output_tokens=canonical_usage.output_tokens,
                     cache_read_tokens=canonical_usage.cache_read_tokens,
@@ -279,9 +287,9 @@ def record_response_usage(
         if getattr(compressor, "_context_probed", False):
             ctx = compressor.context_length
             if getattr(compressor, "_context_probe_persistable", False):
-                from agent.model_metadata import save_context_length
+                from agent.model_metadata import save_provider_context_length
 
-                save_context_length(agent.model, agent.base_url, ctx)
+                save_provider_context_length(agent.model, agent.base_url, ctx, agent.provider)
                 agent._safe_print(f"{agent.log_prefix}💾 Cached context length: {ctx:,} tokens for {agent.model}")
             compressor._context_probed = False
             compressor._context_probe_persistable = False
