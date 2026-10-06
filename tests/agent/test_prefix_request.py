@@ -447,3 +447,37 @@ def test_appended_assistant_rows_get_reasoning_content_like_a_main_request():
     finally:
         client.close()
 
+
+def test_changed_white_space_inside_a_sent_row_is_refused():
+    # White space is API-visible: it can change code, tables, or commands.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        history[0]["content"] = "def f():\n    return 1"
+        ordinary["messages"][1]["content"] = "def f():\n  return 1"
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_a_replacement_reply_from_execution_middleware_is_refused(monkeypatch):
+    agent, calls, ordinary, client, history = make_agent()
+
+    def replace(request=None, next_call=None, **context):
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(
+            content="## Goal\nA handoff that the server did not write.", tool_calls=None, refusal=None))], usage=None)
+
+    def change(request=None, next_call=None, **context):
+        response = next_call()
+        response.choices[0].message.content = "## Goal\nChanged."
+        return response
+    try:
+        ordinary_turn(agent, ordinary, history)
+        for middleware in (replace, change):
+            _execution_middleware(monkeypatch, middleware)
+            with pytest.raises(PrefixRequestError, match="middleware_changed_reply"):
+                PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+

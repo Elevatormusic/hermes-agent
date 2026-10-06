@@ -88,10 +88,11 @@ def _shape(row):
     return row.get("role"), row.get("tool_call_id"), tuple(names)
 
 
-def _words(content):
+def _text(content):
+    """The text of a content value. White space stays: it can change code, tables, or commands."""
     if isinstance(content, list):
-        content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return " ".join(str(content or "").split())
+        content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return str(content or "")
 
 
 def _arguments(value):
@@ -112,11 +113,17 @@ def _same_row(wire, row):
         return False
     if wire.get("name") != row.get("name") and not (wire.get("name") is None and row.get("role") == "tool"):
         return False
-    if _words(_sent(row).get("content")) not in _words(wire.get("content")):
+    if _text(_sent(row).get("content")).strip() not in _text(wire.get("content")):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
     return calls(wire) == calls(row)
+
+
+def _dump(response):
+    """A comparable copy of an SDK response."""
+    dump = getattr(response, "model_dump", None)
+    return dump() if callable(dump) else repr(response)
 
 
 def _route(agent):
@@ -367,15 +374,23 @@ class PrefixRequest:
             self._check()
             started = time.monotonic()
 
+            sent = []
+
             def _send(request):
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
-                return client.chat.completions.create(
+                response = client.chat.completions.create(
                     model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
+                sent.append((response, _dump(response)))
+                return response
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
                 response = run_llm_execution_middleware(body, _send, original_request=body, **context)
             except Exception as error:
                 raise PrefixRequestError("provider_error") from error
+            # Only the server's own reply: a middleware that skipped the request or changed its reply would make
+            # a text that the model did not write replace the history. A block (None) is incomplete_response.
+            if response is not None and (not sent or response is not sent[0][0] or _dump(response) != sent[0][1]):
+                raise PrefixRequestError("middleware_changed_reply")
             elapsed = time.monotonic() - started
             self._check()
         finally:
