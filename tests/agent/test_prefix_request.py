@@ -563,3 +563,31 @@ def test_capacity_is_checked_again_after_the_request_middleware(monkeypatch):
     finally:
         client.close()
 
+
+def test_a_changed_json_type_in_arguments_is_refused():
+    # true and 1 are different on the wire; Python == does not see it.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        _tool_round(history, ordinary)
+        history[1]["tool_calls"][0]["function"]["arguments"] = '{"path": "a.txt", "force": true}'
+        ordinary["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"path":"a.txt","force":1}'
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="source_transform_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("base_url, kept", [("https://openrouter.ai/api/v1", True), ("https://sink.invalid/v1", False)])
+def test_appended_rows_keep_reasoning_details_on_a_replaying_route(base_url, kept):
+    agent, calls, ordinary, client, history = make_agent()
+    agent.base_url = base_url
+    details = [{"type": "reasoning.encrypted", "data": "abc"}]
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history[-1]["reasoning_details"] = details
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-2].get("reasoning_details") == (details if kept else None)
+    finally:
+        client.close()
+

@@ -66,9 +66,10 @@ def _sent(row):
 
 def _wire(row, copy_reasoning=None):
     """The Chat Completions form of a history row that came after the captured request. ``copy_reasoning`` is
-    the agent's ``_copy_reasoning_content_for_api``: reasoning_content as a main request sends it."""
+    the agent's ``_copy_reasoning_content_for_api``: reasoning_content as a main request sends it.
+    ``reasoning_details`` stays here; the transport keeps it only on a route that replays it."""
     source, row = row, _sent(row)
-    out = {k: row[k] for k in _WIRE_KEYS if row.get(k) is not None}
+    out = {k: row[k] for k in (*_WIRE_KEYS, "reasoning_details") if row.get(k) is not None}
     if copy_reasoning is not None:
         copy_reasoning(source, out)
     if row.get("role") == "assistant":
@@ -97,11 +98,13 @@ def _text(content):
 
 
 def _arguments(value):
-    """The JSON value of tool-call arguments: spacing and key order are not a change."""
+    """Canonical tool-call arguments: spacing and key order are not a change, a JSON type is (``true`` and ``1``
+    differ, which Python ``==`` does not see). Text that is not JSON stays as it is."""
     try:
-        return json.loads(value) if isinstance(value, str) else value
+        value = json.loads(value) if isinstance(value, str) else value
     except ValueError:
-        return " ".join(value.split())
+        return "text", value
+    return "json", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _same_row(wire, row):
