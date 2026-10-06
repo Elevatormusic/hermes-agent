@@ -96,6 +96,10 @@ def test_manual_compress_uses_the_warm_reply_and_no_aux_call():
     (FakePrefixRequest(reply={"content": "\n".join(WARM_HANDOFF_HEADINGS), "finish_reason": "stop",
                               "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
      "refused:section_empty"),
+    # A repeated heading is not section text: a second "## Goal" line must not count as the goal.
+    (FakePrefixRequest(reply={"content": "\n".join(f"{h}\n{h}" for h in WARM_HANDOFF_HEADINGS), "finish_reason": "stop",
+                              "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
+     "refused:heading_repeated"),
     (FakePrefixRequest(reply={"content": HANDOFF, "finish_reason": "stop", "tool_calls": True, "refusal": False,
                               "usage": {}, "elapsed_s": 1.0}), "refused:tool_call"),
     (FakePrefixRequest(reply={"content": SUMMARY_PREFIX + "\n" + HANDOFF, "finish_reason": "stop",

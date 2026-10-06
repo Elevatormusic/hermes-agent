@@ -108,6 +108,9 @@ class WarmHandoffMixin:
         lines = [line.strip() for line in content.splitlines()]
         if any(heading not in lines for heading in WARM_HANDOFF_HEADINGS):
             return "heading_missing"
+        # A repeated heading is not section text: a second "## Goal" line must not count as the goal.
+        if any(lines.count(heading) > 1 for heading in WARM_HANDOFF_HEADINGS):
+            return "heading_repeated"
         starts = [lines.index(heading) for heading in WARM_HANDOFF_HEADINGS]
         if starts != sorted(starts):
             return "heading_order"
