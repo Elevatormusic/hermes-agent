@@ -319,3 +319,55 @@ def test_a_request_with_other_rows_is_refused(change):
         assert len(calls) == 1
     finally:
         client.close()
+
+
+def _execution_middleware(monkeypatch, *callbacks):
+    import hermes_cli.plugins as plugins
+    manager = SimpleNamespace(_middleware={"llm_execution": list(callbacks)},
+                              _report_hook_failure=lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+
+
+def test_the_request_runs_through_the_execution_middleware(monkeypatch):
+    seen = []
+
+    def audit(request=None, next_call=None, **context):
+        seen.append((len(request["messages"]), context.get("purpose"), context.get("session_id")))
+        return next_call()
+    _execution_middleware(monkeypatch, audit)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        result = PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert result["content"] == "Synthetic handoff."
+        assert seen == [(len(calls[1]["messages"]), "context_prefix_request", "synthetic")]
+    finally:
+        client.close()
+
+
+def test_a_blocking_execution_middleware_stops_the_request(monkeypatch):
+    def block(request=None, next_call=None, **context):
+        return None  # A policy middleware blocks by not calling next_call.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        _execution_middleware(monkeypatch, block)
+        with pytest.raises(PrefixRequestError, match="incomplete_response"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_a_media_part_in_the_sent_rows_is_refused():
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary["messages"][1]["content"] = [
+            {"type": "text", "text": ordinary["messages"][1]["content"]},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
+        ordinary_turn(agent, ordinary, history)
+        with pytest.raises(PrefixRequestError, match="messages_unsupported"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()

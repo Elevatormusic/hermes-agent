@@ -92,7 +92,7 @@ def _arguments(value):
 def _same_row(wire, row):
     """The sent row carries the stored row: the same shape, the same name or none (the transport drops
     ``name`` from tool rows), the stored text inside the sent text (the host adds request-time context), and
-    the same tool-call arguments. A row that a hook or middleware rewrote would make the handoff summarize
+    the same tool-call arguments. Non-text parts are refused before this check (``messages_unsupported``). A row that a hook or middleware rewrote would make the handoff summarize
     text that is not in the history it replaces."""
     if _shape(wire) != _shape(row) or wire.get("name") not in (None, row.get("name")):
         return False
@@ -325,10 +325,18 @@ class PrefixRequest:
                 raise PrefixRequestError("plain_sdk_required")
             self._check()
             started = time.monotonic()
-            try:
+            from hermes_cli.middleware import run_llm_execution_middleware
+
+            def _send(request):
                 # The final body travels in extra_body; the SDK merges it after its typed fields.
-                response = client.chat.completions.create(
-                    model=body["model"], messages=[], extra_body=body, timeout=self._deadline - started)
+                return client.chat.completions.create(
+                    model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
+            try:
+                # Like a main request, this request goes through llm_execution middleware (audit, policy).
+                response = run_llm_execution_middleware(
+                    body, _send, original_request=body, purpose="context_prefix_request", api_request_id=None,
+                    session_id=agent.session_id or "", model=agent.model, provider=agent.provider,
+                    base_url=agent.base_url, api_mode=agent.api_mode)
             except Exception as error:
                 raise PrefixRequestError("provider_error") from error
             elapsed = time.monotonic() - started
