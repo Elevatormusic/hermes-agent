@@ -304,6 +304,7 @@ def test_host_wire_transforms_of_the_same_rows_are_accepted():
     lambda messages: messages[2]["tool_calls"][0]["function"].__setitem__("arguments", '{"path":"b.txt"}'),
     lambda messages: messages.__delitem__(slice(1, 4)),
     lambda messages: messages.append({"role": "user", "content": "Request-time note."}),
+    lambda messages: messages[1].__setitem__("name", "another_user"),
     lambda messages: messages[2]["tool_calls"][0].__setitem__("id", "call_9") or messages[3].__setitem__(
         "tool_call_id", "call_9"),
 ])

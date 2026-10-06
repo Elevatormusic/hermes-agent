@@ -90,10 +90,13 @@ def _arguments(value):
 
 
 def _same_row(wire, row):
-    """The sent row carries the stored row: the same shape, the stored text inside the sent text (the host
-    adds request-time context), and the same tool-call arguments. A row that a hook or middleware rewrote
-    would make the handoff summarize text that is not in the history it replaces."""
-    if _shape(wire) != _shape(row) or _words(row.get("content")) not in _words(wire.get("content")):
+    """The sent row carries the stored row: the same shape, the same name or none (the transport drops
+    ``name`` from tool rows), the stored text inside the sent text (the host adds request-time context), and
+    the same tool-call arguments. A row that a hook or middleware rewrote would make the handoff summarize
+    text that is not in the history it replaces."""
+    if _shape(wire) != _shape(row) or wire.get("name") not in (None, row.get("name")):
+        return False
+    if _words(row.get("content")) not in _words(wire.get("content")):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
