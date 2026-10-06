@@ -310,6 +310,80 @@ describe('useStatusSnapshot', () => {
     expect(requestGatewayMock).toHaveBeenCalledTimes(3)
   })
 
+  it('retries readiness on the 60s tick while no authoritative verdict exists yet', async () => {
+    // A gateway flap answers with no boolean at all, so the round falls back to
+    // the transport verdict and the status stays null — the chip reads
+    // "checking" until some later seam fires, if one ever does.
+    let answering = false
+
+    const requestGatewayMock = vi.fn(async (method: string) => {
+      if (!answering) {
+        return {} as never
+      }
+
+      return (method === 'setup.runtime_check' ? { ok: true } : { provider_configured: true }) as never
+    })
+
+    const requestGateway = requestGatewayMock as unknown as GatewayRequester
+
+    const { result } = renderHook(() => useStatusSnapshot('open', requestGateway))
+    await flushAsync()
+
+    expect(result.current.inferenceStatus).toBeNull()
+
+    answering = true
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    const methods = requestGatewayMock.mock.calls.map(([method]) => method)
+    expect(methods.filter(method => method === 'setup.runtime_check')).toHaveLength(2)
+    expect(result.current.inferenceStatus).toMatchObject({ ready: true, source: 'runtime_check' })
+  })
+
+  it('retries a fully failed readiness round on the tick, then stops once a verdict lands', async () => {
+    // Both readiness legs fail here, which is the only shape that leaves no
+    // authoritative answer at all: one surviving leg is enough to publish.
+    let answering = false
+
+    const requestGatewayMock = vi.fn(async (method: string) => {
+      if (!answering) {
+        throw new Error(`${method} connection closed`)
+      }
+
+      return (method === 'setup.runtime_check' ? { ok: true } : { provider_configured: true }) as never
+    })
+
+    const requestGateway = requestGatewayMock as unknown as GatewayRequester
+
+    const { result } = renderHook(() => useStatusSnapshot('open', requestGateway))
+    await flushAsync()
+
+    expect(result.current.inferenceStatus).toBeNull()
+
+    answering = true
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    expect(result.current.inferenceStatus).toMatchObject({ ready: true, source: 'runtime_check' })
+
+    // Recovery ends the retries: an answered chip needs no further readiness
+    // traffic, so the ambient 60s poll goes back to being status-only.
+    requestGatewayMock.mockClear()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    const methods = requestGatewayMock.mock.calls.map(([method]) => method)
+    expect(methods.filter(method => method === 'setup.runtime_check')).toHaveLength(0)
+    expect(getStatus).toHaveBeenCalledTimes(3)
+    expect(result.current.inferenceStatus).toMatchObject({ ready: true, source: 'runtime_check' })
+  })
+
   it('re-reads readiness and the free-tier verdict once per setup.ready, off the status tick', async () => {
     const requestGatewayMock = vi.fn(
       async (method: string) =>

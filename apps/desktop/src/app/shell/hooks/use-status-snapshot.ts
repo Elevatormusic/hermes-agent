@@ -31,23 +31,39 @@ export function useStatusSnapshot(
     let timer: number | undefined
     let sharedProfileWarning: boolean = false
     let sharedProfileNoticeId: string | undefined
+    // Whether this run has published an authoritative readiness verdict. The
+    // tick's callback cannot read the state it belongs to, and the flag's
+    // lifetime is exactly this run's — the same run that clears the status on
+    // entry — so the two can never disagree.
+    let readinessAnswered = false
+
+    const publishInferenceStatus = (next: RuntimeReadinessResult | null): void => {
+      readinessAnswered = next !== null
+      setInferenceStatus(next)
+    }
 
     // Status and inference readiness belong to one backend. A source switch
     // can keep gatewayState="open" throughout, so clear the previous source's
     // snapshot and start a fresh scoped request explicitly.
     setStatusSnapshot(null)
-    setInferenceStatus(null)
+    publishInferenceStatus(null)
 
     // A closed/connecting gateway cannot have an authoritative live-runtime
     // result. Clear readiness before starting the REST status leg so a hung
     // getStatus() cannot leave a stale "ready" state visible after disconnect.
     if (gatewayState !== 'open') {
-      setInferenceStatus(null)
+      publishInferenceStatus(null)
     }
 
     const scheduleRefresh = () => {
       if (!cancelled) {
-        timer = window.setTimeout(() => void refresh({ readiness: false }), REFRESH_MS)
+        // Readiness rides the tick only while there is still no authoritative
+        // answer to show. A round that came back a transport fallback leaves a
+        // null status, which reads as "checking" — and the only other triggers
+        // are seams this window may never cross again, so a gateway flap
+        // outliving one seam would pin the chip for good. Once a verdict
+        // exists the tick stays status-only, keeping the ambient poll cheap.
+        timer = window.setTimeout(() => void refresh({ readiness: !readinessAnswered }), REFRESH_MS)
       }
     }
 
@@ -86,7 +102,7 @@ export function useStatusSnapshot(
         // is a transient/unknown transport state, not proof that inference
         // became unconfigured. Keep the last authoritative result instead
         // of flashing "Inference not ready" during a gateway flap.
-        setInferenceStatus(inference)
+        publishInferenceStatus(inference)
         setFreeTierRoute(inference.freeTier)
       }
     }
