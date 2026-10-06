@@ -51,7 +51,8 @@ def _source(messages):
 
 
 def _key(row):
-    return {k: row.get(k) for k in _WIRE_KEYS}
+    """The row fields that the provider sees, with the ``api_content`` sidecar that replaces the content."""
+    return {**{k: row.get(k) for k in _WIRE_KEYS}, "api_content": row.get("api_content")}
 
 
 def _sent(row):
@@ -329,20 +330,28 @@ class PrefixRequest:
         rows = body["messages"][offset:]
         if len(rows) != len(source) or not all(_same_row(wire, row) for wire, row in zip(rows, source)):
             raise PrefixRequestError("source_transform_unsupported")
-        from agent.model_metadata import estimate_messages_tokens_rough, estimate_request_tokens_rough
+        from agent.model_metadata import estimate_request_tokens_rough
         # The server count of the captured request is exact; only the new rows are estimated.
         reported = ((capsule.get("usage") or {}).get("prompt_tokens"))
-        prefix_tokens = reported or estimate_request_tokens_rough(body["messages"], tools=body.get("tools"))
+        self._prefix_tokens = reported or estimate_request_tokens_rough(body["messages"], tools=body.get("tools"))
         added = [*suffix, {"role": "user", "content": instruction}]
         body["messages"] = [*body["messages"], *added]
         self._text_messages(body["messages"])
         body["stream"] = False
         body.pop("stream_options", None)
-        limit = int(getattr(agent.context_compressor, "context_length", 0) or 0)
-        reserve = body.get("max_tokens") or body.get("max_completion_tokens") or _DEFAULT_OUTPUT_RESERVE
-        if limit <= 0 or prefix_tokens + estimate_messages_tokens_rough(added) + reserve > limit:
-            raise PrefixRequestError("capacity")
+        # A stop sequence of the main request could cut the handoff after its headings.
+        body.pop("stop", None)
+        self._check_capacity(body, len(capsule["body"]["messages"]))
         return body
+
+    def _check_capacity(self, body, count):
+        """The measured (or estimated) captured prefix, the estimated rows after it, and the reply reserve must
+        fit in the context window."""
+        from agent.model_metadata import estimate_messages_tokens_rough
+        limit = int(getattr(self._agent.context_compressor, "context_length", 0) or 0)
+        reserve = body.get("max_tokens") or body.get("max_completion_tokens") or _DEFAULT_OUTPUT_RESERVE
+        if limit <= 0 or self._prefix_tokens + estimate_messages_tokens_rough(body["messages"][count:]) + reserve > limit:
+            raise PrefixRequestError("capacity")
 
     def __call__(self, instruction, *, timeout_s=120.0):
         with self._lock:
@@ -377,6 +386,8 @@ class PrefixRequest:
                 or changed["messages"][:count] != body["messages"][:count]):
             raise PrefixRequestError("middleware_rewrite")
         body = changed
+        # A request middleware can add text to the rows after the capture: check the size again.
+        self._check_capacity(body, count)
         client = agent._create_request_openai_client(reason="context_prefix_request", api_kwargs=body)
         try:
             from openai import OpenAI

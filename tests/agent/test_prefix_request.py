@@ -518,3 +518,48 @@ def test_a_request_middleware_that_changes_the_captured_part_is_refused(monkeypa
     finally:
         client.close()
 
+
+def test_a_changed_api_content_sidecar_is_a_changed_history():
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        history[0]["api_content"] = "[a]" + history[0]["content"]
+        ordinary["messages"][1]["content"] = history[0]["api_content"]
+        ordinary_turn(agent, ordinary, history)
+        history[0]["api_content"] = "[b]" + history[0]["content"]
+        with pytest.raises(PrefixRequestError, match="history_changed"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+    finally:
+        client.close()
+
+
+def test_the_stop_setting_is_not_sent():
+    # A stop sequence of the main request could cut the handoff after its headings.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary["stop"] = ["## Next"]
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert "stop" in calls[0] and "stop" not in calls[1]
+    finally:
+        client.close()
+
+
+def test_capacity_is_checked_again_after_the_request_middleware(monkeypatch):
+    def expand(request=None, **context):
+        request["messages"][-1]["content"] += " context" * 100_000
+        return {"request": request}
+    import hermes_cli.plugins as plugins
+    manager = SimpleNamespace(
+        _middleware={"llm_request": [expand]}, has_middleware=lambda kind: kind == "llm_request",
+        invoke_middleware=lambda kind, **kwargs: [expand(**kwargs)] if kind == "llm_request" else [],
+        _report_hook_failure=lambda *args, **kwargs: None)
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+        with pytest.raises(PrefixRequestError, match="capacity"):
+            PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert len(calls) == 1
+    finally:
+        client.close()
+
