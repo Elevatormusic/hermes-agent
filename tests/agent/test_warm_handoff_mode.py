@@ -109,6 +109,10 @@ def test_manual_compress_uses_the_warm_reply_and_no_aux_call():
     (FakePrefixRequest(reply={"content": SUMMARY_PREFIX + "\n" + HANDOFF, "finish_reason": "stop",
                               "tool_calls": False, "refusal": False, "usage": {}, "elapsed_s": 1.0}),
      "refused:carrier_marker"),
+    # Under the byte bound, but larger than any summary that the compressor plans for this window.
+    (FakePrefixRequest(reply={"content": HANDOFF.replace("Synthetic warm line.", "word " * 2400, 1),
+                              "finish_reason": "stop", "tool_calls": False, "refusal": False, "usage": {},
+                              "elapsed_s": 1.0}), "refused:token_bound"),
 ])
 def test_any_warm_failure_falls_back_to_the_aux_summary(warm, reason):
     compressor = _make_compressor(warm_handoff=True)

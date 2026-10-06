@@ -125,6 +125,13 @@ class WarmHandoffMixin:
             return "refusal"
         return None
 
+    def _warm_handoff_too_large(self, content: str) -> bool:
+        """The handoff is larger than any summary that the compressor plans for this window (the summary budget
+        ceiling). A dense reply can pass the byte bound and still leave the history above the threshold."""
+        from agent.context_compressor import _MIN_SUMMARY_TOKENS
+        from agent.model_metadata import estimate_tokens_rough
+        return estimate_tokens_rough(content) > max(_MIN_SUMMARY_TOKENS, int(self.max_summary_tokens))
+
     def _warm_handoff_text(self, has_user_turn: bool = True, focus_topic: Optional[str] = None) -> Optional[str]:
         """Use the one same-prefix request of this attempt. None means: make the normal aux call.
         ``has_user_turn`` and ``focus_topic`` are the values that the normal summary prompt uses."""
@@ -158,6 +165,8 @@ class WarmHandoffMixin:
             result.update(elapsed_s=reply.get("elapsed_s"), prompt_tokens=usage.get("prompt_tokens"),
                           cache_read_tokens=usage.get("cache_read_tokens"))
             refusal = self._warm_handoff_refusal(reply)
+            if refusal is None and self._warm_handoff_too_large(reply["content"]):
+                refusal = "token_bound"
             if refusal is None:
                 result.update(used=True, reason="accepted")
                 logger.info("Compression warm handoff accepted: elapsed_s=%s prompt_tokens=%s cache_read_tokens=%s",

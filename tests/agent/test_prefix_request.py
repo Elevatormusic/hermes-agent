@@ -942,3 +942,14 @@ def test_a_captured_row_with_an_extra_field_is_refused(field, accepted):
     finally:
         client.close()
 
+
+def test_a_changed_tool_call_type_is_refused():
+    # The same keys with another type value: the provider reads another kind of call than the stored one.
+    from agent.prefix_request import _no_extra_fields
+    want = {"role": "assistant", "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}
+    changed = copy.deepcopy(want)
+    changed["tool_calls"][0]["type"] = "custom"
+    assert _no_extra_fields(want, want)
+    assert not _no_extra_fields(changed, want)
+
