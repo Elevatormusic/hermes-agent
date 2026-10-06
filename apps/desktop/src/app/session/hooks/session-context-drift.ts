@@ -37,6 +37,64 @@ interface SessionContextDriftArgs {
    * a real chat as drift.
    */
   submitTargetStoredId?: string | null
+  /**
+   * The composer scope that was actually loaded when the text was submitted
+   * (SubmitTextOptions.composerScope). The composer and the session-side refs
+   * live in separate React subtrees and can each be internally consistent yet
+   * still disagree with each other at the instant of send — this prong catches
+   * that cross-component drift (#59305). Omit for non-composer submits.
+   */
+  composerScope?: string | null
+  /**
+   * resolveComposerSessionKey(submitTargetStoredId, sessions) — the durable
+   * lineage-root form of the submit target, in the SAME domain as
+   * composerScope. Compared against composerScope instead of the raw
+   * submitTargetStoredId: the composer keys drafts/attachments on the lineage
+   * root (stable across auto-compression tip rotation) while
+   * submitTargetStoredId tracks the live tip — comparing composerScope
+   * directly against the tip would false-positive-abort every submit into any
+   * session that has ever compressed.
+   */
+  submitTargetComposerScope?: string | null
+  /**
+   * The owner token of the request this check belongs to. Only pins created by
+   * the SAME owner are honored; omit to ignore pins entirely.
+   */
+  pinOwner?: string
+}
+
+// Pins are OWNED (#85590 review): a drift check honors only pins created by the
+// SAME owner token — the submit/route generation that created them — so an
+// overlapping request can never suppress another request's drift detection.
+const pinnedByOwner = new Map<string, Set<string>>()
+
+/** Shared empty set: a non-owning caller allocates nothing. */
+const NO_PINS: ReadonlySet<string> = new Set()
+
+/** Mark `storedSessionId` as re-homed by `owner` until its terminal release. */
+export function pinStoredSessionForOwner(owner: string, storedSessionId: string): void {
+  const pinned = pinnedByOwner.get(owner)
+
+  if (pinned) {
+    pinned.add(storedSessionId)
+  } else {
+    pinnedByOwner.set(owner, new Set([storedSessionId]))
+  }
+}
+
+/** Terminal release: the owner's request settled (accepted, failed, cancelled).
+ *  Route settlement is evidence, not a tick budget. */
+export function releaseStoredSessionPins(owner: string): void {
+  pinnedByOwner.delete(owner)
+}
+
+export function pinnedStoredSessionIdsForOwner(owner: string): ReadonlySet<string> {
+  return pinnedByOwner.get(owner) ?? NO_PINS
+}
+
+/** Owners still holding a pin. Observability + tests. */
+export function pinnedOwnerCount(): number {
+  return pinnedByOwner.size
 }
 
 /**
@@ -56,8 +114,24 @@ export function sessionContextDrift({
   nowRouteToken,
   startSelectedStoredId,
   nowSelectedStoredId,
-  submitTargetStoredId
+  submitTargetStoredId,
+  composerScope,
+  submitTargetComposerScope,
+  pinOwner
 }: SessionContextDriftArgs): string | null {
+  const activePins = pinOwner ? pinnedStoredSessionIdsForOwner(pinOwner) : NO_PINS
+
+  // Composer prong: the composer's loaded scope disagrees with the resolved
+  // submit target. Not a start/now comparison like the two prongs below — the
+  // composer only hands us one snapshot per submit — but it belongs in the
+  // same fail-closed gate since it's exactly the same "wrong session" failure
+  // mode. Compared against submitTargetComposerScope (lineage-pinned), NOT
+  // submitTargetStoredId (live tip) — see the field doc on
+  // SessionContextDriftArgs for why those two must not be conflated.
+  if (composerScope !== undefined && composerScope !== null && composerScope !== submitTargetComposerScope) {
+    return `composer:${composerScope}->${submitTargetComposerScope}`
+  }
+
   const targetStart = routeTargetFromToken(startRouteToken)
   const targetNow = routeTargetFromToken(nowRouteToken)
 
@@ -65,7 +139,12 @@ export function sessionContextDrift({
   // (navigated to settings / a non-chat overlay route) or a search/hash-only
   // change (same target) is not drift, and neither is landing on the submit's
   // own target.
-  if (targetNow !== targetStart && targetNow !== null && targetNow !== submitTargetStoredId) {
+  if (
+    targetNow !== targetStart &&
+    targetNow !== null &&
+    targetNow !== submitTargetStoredId &&
+    !(targetNow !== '__new__' && activePins.has(targetNow))
+  ) {
     return `route:${targetStart}->${targetNow}`
   }
 
@@ -75,7 +154,8 @@ export function sessionContextDrift({
   if (
     nowSelectedStoredId !== null &&
     nowSelectedStoredId !== startSelectedStoredId &&
-    nowSelectedStoredId !== submitTargetStoredId
+    nowSelectedStoredId !== submitTargetStoredId &&
+    !activePins.has(nowSelectedStoredId)
   ) {
     return `selection:${startSelectedStoredId}->${nowSelectedStoredId}`
   }

@@ -1,8 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../routes'
 
-import { routeTargetFromToken, sessionContextDrift } from './session-context-drift'
+import {
+  pinnedOwnerCount,
+  pinnedStoredSessionIdsForOwner,
+  pinStoredSessionForOwner,
+  releaseStoredSessionPins,
+  routeTargetFromToken,
+  sessionContextDrift
+} from './session-context-drift'
 
 const SESS_A = 'sess-a'
 const SESS_B = 'sess-b'
@@ -27,6 +34,49 @@ describe('routeTargetFromToken', () => {
 })
 
 describe('sessionContextDrift', () => {
+  afterEach(() => {
+    releaseStoredSessionPins('owner-a')
+    releaseStoredSessionPins('owner-b')
+  })
+
+  it('honors a pin only for its owner', () => {
+    pinStoredSessionForOwner('owner-a', 'sess-b')
+
+    const driftInputs = {
+      nowRouteToken: routeToken(sessionRoute(SESS_B)),
+      nowSelectedStoredId: SESS_B,
+      startRouteToken: routeToken(sessionRoute(SESS_A)),
+      startSelectedStoredId: SESS_A,
+      submitTargetStoredId: null
+    }
+
+    expect(
+      sessionContextDrift({
+        ...driftInputs,
+        pinOwner: 'owner-a'
+      })
+    ).toBeNull()
+
+    expect(
+      sessionContextDrift({
+        ...driftInputs,
+        pinOwner: 'owner-b'
+      })
+    ).toBe(`route:${SESS_A}->${SESS_B}`)
+    expect(sessionContextDrift(driftInputs)).toBe(`route:${SESS_A}->${SESS_B}`)
+  })
+
+  it('releases only the named owner', () => {
+    pinStoredSessionForOwner('owner-a', SESS_A)
+    pinStoredSessionForOwner('owner-b', SESS_B)
+
+    releaseStoredSessionPins('owner-a')
+
+    expect(pinnedStoredSessionIdsForOwner('owner-a').size).toBe(0)
+    expect(pinnedStoredSessionIdsForOwner('owner-b')).toContain(SESS_B)
+    expect(pinnedOwnerCount()).toBe(1)
+  })
+
   it('does not drift on search/hash-only route churn', () => {
     const reason = sessionContextDrift({
       startRouteToken: routeToken(sessionRoute(SESS_A)),
@@ -121,5 +171,52 @@ describe('sessionContextDrift', () => {
     })
 
     expect(reason).toBe('route:__new__->sess-b')
+  })
+
+  it('does not drift when composerScope matches the resolved (lineage) submit target', () => {
+    const reason = sessionContextDrift({
+      startRouteToken: routeToken(sessionRoute(SESS_A)),
+      nowRouteToken: routeToken(sessionRoute(SESS_A)),
+      startSelectedStoredId: SESS_A,
+      nowSelectedStoredId: SESS_A,
+      submitTargetStoredId: SESS_A,
+      composerScope: SESS_A,
+      submitTargetComposerScope: SESS_A
+    })
+
+    expect(reason).toBeNull()
+  })
+
+  it('drifts (composer prong) when the loaded composer scope disagrees with the resolved submit target (#59305)', () => {
+    const reason = sessionContextDrift({
+      startRouteToken: routeToken(sessionRoute(SESS_A)),
+      nowRouteToken: routeToken(sessionRoute(SESS_A)),
+      startSelectedStoredId: SESS_A,
+      nowSelectedStoredId: SESS_A,
+      submitTargetStoredId: SESS_A,
+      composerScope: SESS_B,
+      submitTargetComposerScope: SESS_A
+    })
+
+    expect(reason).toBe('composer:sess-b->sess-a')
+  })
+
+  it('does not drift when the session has rotated via compression (composerScope is the lineage root, submitTargetStoredId is the live tip)', () => {
+    const ROOT_ID = 'stored-root'
+    const TIP_ID = 'stored-tip-after-compression'
+
+    const reason = sessionContextDrift({
+      startRouteToken: routeToken(sessionRoute(TIP_ID)),
+      nowRouteToken: routeToken(sessionRoute(TIP_ID)),
+      startSelectedStoredId: TIP_ID,
+      nowSelectedStoredId: TIP_ID,
+      submitTargetStoredId: TIP_ID,
+      composerScope: ROOT_ID,
+      // What submit.ts actually passes: resolveComposerSessionKey(TIP_ID, sessions),
+      // which resolves to the lineage root for a session that has compressed.
+      submitTargetComposerScope: ROOT_ID
+    })
+
+    expect(reason).toBeNull()
   })
 })
