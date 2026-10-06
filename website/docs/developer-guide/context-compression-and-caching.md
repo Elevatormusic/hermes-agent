@@ -346,6 +346,8 @@ do not report this counter are skipped; use `on` for them.
 | --- | --- | --- | --- |
 | Hosted APIs with prompt caching | yes | yes | used |
 | vLLM | yes (default) | only with `--enable-prompt-tokens-details` | used with that flag |
+| SGLang | yes, radix cache (default) | only with `--enable-cache-report` | used with that flag |
+| TensorRT-LLM `trtllm-serve` | yes, KV block reuse | yes | used |
 | llama.cpp `llama-server` | yes, per slot | yes | used |
 | MLX `mlx_lm.server` | yes | yes | used when the cache holds |
 | Ollama (`/v1`) | yes | no | skipped |
