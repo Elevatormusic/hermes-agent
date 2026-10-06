@@ -1,5 +1,7 @@
 """Warm handoff (off | on | auto): the compressor asks the session itself, on the same prefix, for its summary."""
 
+import threading
+from types import MethodType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -215,6 +217,47 @@ def test_the_seam_is_cleared_after_the_attempt():
     with patch("agent.context_compressor.call_llm", return_value=_aux_response()):
         compressor.compress(_make_messages(), current_tokens=100_000, force=True, prefix_request=FakePrefixRequest())
     assert compressor._prefix_request is None
+
+
+def test_overlapping_attempts_keep_their_warm_state_isolated():
+    """A stall fallback may overlap the primary on one compressor; neither may consume the other's warm seam."""
+    compressor = _make_compressor(warm_handoff="on")
+    rendezvous = threading.Barrier(2)
+    observed = {}
+    errors = []
+
+    def fake_compress_messages(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context="",
+                               bypass_cooldown=False):
+        rendezvous.wait(timeout=5)
+        observed[focus_topic] = self._warm_handoff_text(True)
+        rendezvous.wait(timeout=5)
+        return messages
+
+    compressor._compress_messages = MethodType(fake_compress_messages, compressor)
+    first, second = FakePrefixRequest(), FakePrefixRequest()
+
+    def run(label, memory, request):
+        try:
+            compressor.compress([], force=True, focus_topic=label, memory_context=memory, prefix_request=request)
+        except BaseException as error:  # surface worker failures in the parent test
+            errors.append(error)
+
+    workers = [
+        threading.Thread(target=run, args=("topic-a", "memory-a", first)),
+        threading.Thread(target=run, args=("topic-b", "memory-b", second)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert not errors and all(not worker.is_alive() for worker in workers)
+    assert len(first.calls) == len(second.calls) == 1
+    assert "topic-a" in first.calls[0] and "memory-a" in first.calls[0]
+    assert "topic-b" in second.calls[0] and "memory-b" in second.calls[0]
+    assert "topic-b" not in first.calls[0] and "memory-b" not in first.calls[0]
+    assert "topic-a" not in second.calls[0] and "memory-a" not in second.calls[0]
+    assert observed == {"topic-a": HANDOFF, "topic-b": HANDOFF}
 
 
 def test_config_flag_reaches_the_settings():
