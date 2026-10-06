@@ -63,10 +63,13 @@ def _sent(row):
     return row
 
 
-def _wire(row):
-    """The Chat Completions form of a history row that came after the captured request."""
-    row = _sent(row)
+def _wire(row, copy_reasoning=None):
+    """The Chat Completions form of a history row that came after the captured request. ``copy_reasoning`` is
+    the agent's ``_copy_reasoning_content_for_api``: reasoning_content as a main request sends it."""
+    source, row = row, _sent(row)
     out = {k: row[k] for k in _WIRE_KEYS if row.get(k) is not None}
+    if copy_reasoning is not None:
+        copy_reasoning(source, out)
     if row.get("role") == "assistant":
         out.setdefault("content", None if out.get("tool_calls") else "")
     return out
@@ -301,7 +304,8 @@ class PrefixRequest:
         if len(self._source) < count or _row_digests(self._source[:count]) != capsule["source"]:
             raise PrefixRequestError("history_changed")
         source = self._source[:count]
-        suffix = [_wire(row) for row in self._source[len(source):]]
+        copy_reasoning = getattr(agent, "_copy_reasoning_content_for_api", None)
+        suffix = [_wire(row, copy_reasoning) for row in self._source[len(source):]]
         body = _copy(capsule["body"])
         if (body.get("tool_choice") not in (None, "auto", "none") or body.get("n", 1) != 1
                 or any(key in body for key in _UNSUPPORTED_SETTINGS)):

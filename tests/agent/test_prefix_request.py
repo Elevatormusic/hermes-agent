@@ -434,3 +434,16 @@ def test_the_request_runs_through_the_request_middleware(monkeypatch):
     finally:
         client.close()
 
+
+def test_appended_assistant_rows_get_reasoning_content_like_a_main_request():
+    # A thinking-mode route (DeepSeek, Kimi) rejects an assistant row without reasoning_content.
+    from agent.message_sanitization import apply_reasoning_content_policy
+    agent, calls, ordinary, client, history = make_agent()
+    agent._copy_reasoning_content_for_api = lambda source, target: apply_reasoning_content_policy(source, target, True)
+    try:
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-2] == {"role": "assistant", "content": REPLY, "reasoning_content": " "}
+    finally:
+        client.close()
+
