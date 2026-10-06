@@ -105,9 +105,16 @@ class WarmHandoffMixin:
             return "byte_bound"
         if any(marker in content for marker in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX, _SUMMARY_END_MARKER)):
             return "carrier_marker"
-        lines = {line.rstrip() for line in content.splitlines()}
+        lines = [line.strip() for line in content.splitlines()]
         if any(heading not in lines for heading in WARM_HANDOFF_HEADINGS):
             return "heading_missing"
+        starts = [lines.index(heading) for heading in WARM_HANDOFF_HEADINGS]
+        if starts != sorted(starts):
+            return "heading_order"
+        # Goal, state, and next step are needed to continue; there can be no user instructions or key facts.
+        for heading, start, end in zip(WARM_HANDOFF_HEADINGS, starts, [*starts[1:], len(lines)]):
+            if heading in ("## Goal", "## Current state", "## Next step") and not any(lines[start + 1:end]):
+                return "section_empty"
         if _is_summary_refusal(content):
             return "refusal"
         return None
