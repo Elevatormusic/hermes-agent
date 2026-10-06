@@ -720,3 +720,25 @@ def test_reasoning_details_of_a_captured_row_must_be_the_stored_ones(sent, accep
     finally:
         client.close()
 
+
+@pytest.mark.parametrize("main, sent", [
+    ({"max_tokens": 128}, {"max_tokens": 2048}),
+    ({"max_tokens": 3000}, {"max_tokens": 3000}),
+    ({"max_tokens": 60_000}, {"max_tokens": 8192}),
+    ({"max_completion_tokens": 500}, {"max_completion_tokens": 2048}),
+    ({}, {}),
+])
+def test_the_handoff_has_its_own_reply_limit(main, sent):
+    # The reply limit of the main request is for another task: a small one cuts the handoff, a large one
+    # reserves space that the handoff does not need (and can refuse a request that fits).
+    agent, calls, ordinary, client, history = make_agent()
+    ordinary.pop("max_tokens")
+    ordinary.update(main)
+    try:
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        limits = ("max_tokens", "max_completion_tokens")
+        assert {key: calls[1][key] for key in limits if key in calls[1]} == sent
+    finally:
+        client.close()
+

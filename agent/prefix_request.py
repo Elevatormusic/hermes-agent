@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _WIRE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
 _UNSUPPORTED_SETTINGS = ("response_format", "grammar", "functions", "function_call", "modalities", "audio")
 _DEFAULT_OUTPUT_RESERVE = 4096
+# The reply limit of the handoff. The instruction asks for at most 600 words; the upper limit leaves room for a
+# thinking model that counts its reasoning in the same limit.
+_HANDOFF_MIN_TOKENS, _HANDOFF_MAX_TOKENS = 2048, 8192
 _MAX_INSTRUCTION_BYTES = 65536
 _MAX_TIMEOUT_S = 600
 
@@ -372,6 +375,12 @@ class PrefixRequest:
         body.pop("stream_options", None)
         # A stop sequence of the main request could cut the handoff after its headings.
         body.pop("stop", None)
+        # The reply limit of the main request is for another task: a small one cuts the handoff, a large one
+        # reserves space that the handoff does not need. Keep the field that the route uses.
+        for key in ("max_tokens", "max_completion_tokens"):
+            value = body.get(key)
+            if type(value) is int and value > 0:
+                body[key] = min(max(value, _HANDOFF_MIN_TOKENS), _HANDOFF_MAX_TOKENS)
         self._check_capacity(body, len(capsule["body"]["messages"]))
         return body
 
