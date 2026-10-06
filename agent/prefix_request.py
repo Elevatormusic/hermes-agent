@@ -421,10 +421,15 @@ class PrefixRequest:
         body.pop("web_search_options", None)
         # The reply limit of the main request is for another task: a small one cuts the handoff, a large one
         # reserves space that the handoff does not need. Keep the field that the route uses.
-        for key in ("max_tokens", "max_completion_tokens"):
+        limits = ("max_tokens", "max_completion_tokens")
+        for key in limits:
             value = body.get(key)
             if type(value) is int and value > 0:
                 body[key] = min(max(value, _HANDOFF_MIN_TOKENS), _HANDOFF_MAX_TOKENS)
+        # Without a limit the server default applies: a small one cuts the handoff, a large one can take more space
+        # than the capacity check reserves. The handoff gets its own limit in the field of the route.
+        if not any(type(body.get(key)) is int and body.get(key) > 0 for key in limits):
+            body.update(self._agent._max_tokens_param(_HANDOFF_MAX_TOKENS))
         self._check_capacity(body, len(capsule["body"]["messages"]))
         return body
 

@@ -45,6 +45,7 @@ def make_agent(usage=None, reply_content="Synthetic handoff.", finish="stop"):
         _client_kwargs={"api_key": "synthetic-no-secret", "base_url": "https://sink.invalid/v1"},
         _prefix_source_messages=history, _session_messages=history,
         _create_request_openai_client=lambda **kwargs: client,
+        _max_tokens_param=lambda value: {"max_tokens": value},
         _close_request_openai_client=lambda *args, **kwargs: None)
     ordinary = {"model": "synthetic", "messages": [
         {"role": "system", "content": agent._cached_system_prompt}, *copy.deepcopy(history)],
@@ -728,7 +729,9 @@ def test_reasoning_details_of_a_captured_row_must_be_the_stored_ones(sent, accep
     ({"max_tokens": 3000}, {"max_tokens": 3000}),
     ({"max_tokens": 60_000}, {"max_tokens": 8192}),
     ({"max_completion_tokens": 500}, {"max_completion_tokens": 2048}),
-    ({}, {}),
+    # Without a limit the server default applies: a small one cuts the handoff, a large one can take more space
+    # than the capacity check reserves. The handoff gets 8,192 tokens in the field of the route.
+    ({}, {"max_tokens": 8192}),
 ])
 def test_the_handoff_has_its_own_reply_limit(main, sent):
     # The reply limit of the main request is for another task: a small one cuts the handoff, a large one
@@ -878,6 +881,19 @@ def test_the_instruction_joins_a_named_last_user_row():
         history.append({"role": "user", "content": "Next.", "name": "alice"})
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert calls[1]["messages"][-1] == {"role": "user", "name": "alice", "content": "Next.\n\nWrite the handoff."}
+    finally:
+        client.close()
+
+
+def test_a_route_without_a_limit_gets_the_handoff_limit_in_its_own_field():
+    # AIAgent._max_tokens_param chooses the field: max_completion_tokens for the newer OpenAI families.
+    agent, calls, ordinary, client, history = make_agent()
+    agent._max_tokens_param = lambda value: {"max_completion_tokens": value}
+    ordinary.pop("max_tokens")
+    try:
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1].get("max_completion_tokens") == 8192 and "max_tokens" not in calls[1]
     finally:
         client.close()
 

@@ -33,8 +33,10 @@ WARM_HANDOFF = "\n\n".join(f"{heading}\n- {WARM_TOKEN} line." for heading in WAR
 WARM_CONFIG = "  warm_handoff: on\n"
 WARM_MARK = WARM_HANDOFF_INSTRUCTION.splitlines()[0]
 AUTOMATIC_KINDS = ("tools", "parallel", "chat")
-# Only these keys may differ between the final ordinary request and the warm request.
-_REQUEST_ONLY_KEYS = ("messages", "stream", "stream_options")
+# Only these keys may differ between the final ordinary request and the warm request. The handoff has its own
+# reply limit (checked apart).
+_LIMIT_KEYS = ("max_tokens", "max_completion_tokens")
+_REQUEST_ONLY_KEYS = ("messages", "stream", "stream_options", *_LIMIT_KEYS)
 
 
 def _session(make_scenario, tmp_path, seed, *, extra=WARM_CONFIG):
@@ -80,6 +82,8 @@ def test_manual_compress_uses_the_warm_handoff(make_scenario, tmp_path, seed):
     assert all(heading in warm["messages"][n + 1]["content"] for heading in WARM_HANDOFF_HEADINGS)
     assert warm.get("stream") is False and "stream_options" not in warm
     assert _settings(warm) == _settings(final), "the warm request changed a request setting"
+    if not any(final.get(key) for key in _LIMIT_KEYS):
+        assert sorted(key for key in _LIMIT_KEYS if warm.get(key) == 8192) in (["max_tokens"], ["max_completion_tokens"])
     assert sc.agent.context_compressor._last_warm_handoff == {
         "used": True, "reason": "accepted", "elapsed_s": sc.agent.context_compressor._last_warm_handoff["elapsed_s"],
         "prompt_tokens": sc.server.requests[-1]["usage"]["prompt_tokens"], "cache_read_tokens": 777}
