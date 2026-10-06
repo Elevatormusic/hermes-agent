@@ -338,6 +338,19 @@ The speedup needs the same model and a prompt cache. A summary that goes to a di
 smaller model cannot reuse the cache of the main model; `auto` therefore skips the warm
 request in that case.
 
+`auto` cannot ask the server whether it caches prompts, so it uses the last main response as
+evidence: `usage.prompt_tokens_details.cached_tokens` greater than 0. Servers that cache but
+do not report this counter are skipped; use `on` for them.
+
+| Server | Prefix cache | Reports `cached_tokens` | `auto` |
+| --- | --- | --- | --- |
+| Hosted APIs with prompt caching | yes | yes | used |
+| vLLM | yes (default) | only with `--enable-prompt-tokens-details` | used with that flag |
+| llama.cpp `llama-server` | yes, per slot | yes | used |
+| MLX `mlx_lm.server` | yes | yes | used when the cache holds |
+| Ollama (`/v1`) | yes | no | skipped |
+| LM Studio | yes | no | skipped |
+
 Cost on a paid API: the auxiliary summary is also a new, uncached request, but a small one,
 because the summarizer input cuts long messages and is capped at 160,000 characters. The warm
 request sends the whole conversation, almost all of it as cached tokens, and its reply is
