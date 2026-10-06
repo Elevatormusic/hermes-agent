@@ -36,8 +36,8 @@ _WARM_HANDOFF_TIMEOUT_S = 120.0
 # auto: hosted prompt caches expire after minutes without use. An older capture can mean a cold request that
 # reads the whole conversation at full price, so auto then keeps the auxiliary summary.
 WARM_HANDOFF_AUTO_MAX_AGE_S = 300.0
-# Compression stall fallback can overlap attempts on the same ContextCompressor. Keep the warm seam
-# attempt-local so one worker cannot consume or clear another worker's prefix request/focus/memory.
+# A stalled compression can overlap another attempt on the same compressor.
+# Keep each worker's request, focus and memory in its own context.
 _WARM_HANDOFF_ATTEMPT: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
     "hermes_warm_handoff_attempt", default=None
 )
@@ -89,8 +89,6 @@ class WarmHandoffMixin:
 
     def _init_warm_handoff(self, warm_handoff: Any) -> None:
         self.warm_handoff = normalize_warm_handoff(warm_handoff)
-        self._prefix_request = None
-        self._prefix_focus, self._prefix_memory = None, ""
         self._last_warm_handoff = None
 
     @staticmethod
@@ -244,6 +242,5 @@ class WarmHandoffMixin:
                                            bypass_cooldown)
         finally:
             _WARM_HANDOFF_ATTEMPT.reset(token)
-            # Publish diagnostics only after the attempt finishes. Overlapping workers keep independent live state;
-            # this field simply describes whichever attempt completed most recently.
+            # Publish only after this attempt ends. This field describes the last completed attempt.
             self._last_warm_handoff = attempt["result"]

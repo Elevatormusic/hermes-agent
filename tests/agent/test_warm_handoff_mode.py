@@ -212,15 +212,24 @@ def test_focus_topic_reaches_the_warm_instruction():
     assert "database schema" in warm.calls[0]
 
 
-def test_the_seam_is_cleared_after_the_attempt():
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_seam_is_cleared_after_the_attempt(fails, monkeypatch):
     compressor = _make_compressor(warm_handoff=True)
+    warm = FakePrefixRequest()
+    if fails:
+        monkeypatch.setattr(compressor, "_compress_messages", MagicMock(side_effect=RuntimeError("failed")))
     with patch("agent.context_compressor.call_llm", return_value=_aux_response()):
-        compressor.compress(_make_messages(), current_tokens=100_000, force=True, prefix_request=FakePrefixRequest())
-    assert compressor._prefix_request is None
+        if fails:
+            with pytest.raises(RuntimeError, match="failed"):
+                compressor.compress(_make_messages(), current_tokens=100_000, force=True, prefix_request=warm)
+        else:
+            compressor.compress(_make_messages(), current_tokens=100_000, force=True, prefix_request=warm)
+    assert compressor._warm_handoff_text() is None
+    assert len(warm.calls) == (0 if fails else 1)
 
 
 def test_overlapping_attempts_keep_their_warm_state_isolated():
-    """A stall fallback may overlap the primary on one compressor; neither may consume the other's warm seam."""
+    """Two compression workers must use their own warm requests."""
     compressor = _make_compressor(warm_handoff="on")
     rendezvous = threading.Barrier(2)
     observed = {}
@@ -258,6 +267,42 @@ def test_overlapping_attempts_keep_their_warm_state_isolated():
     assert "topic-b" not in first.calls[0] and "memory-b" not in first.calls[0]
     assert "topic-a" not in second.calls[0] and "memory-a" not in second.calls[0]
     assert observed == {"topic-a": HANDOFF, "topic-b": HANDOFF}
+
+
+def test_nested_attempt_restores_owner_and_keeps_live_diagnostics_private(monkeypatch):
+    compressor = _make_compressor(warm_handoff="on")
+    other = _make_compressor(warm_handoff="on")
+    outer, inner = FakePrefixRequest(), FakePrefixRequest()
+    outer.reply["usage"]["prompt_tokens"] = 11
+    inner.reply["usage"]["prompt_tokens"] = 22
+
+    def fake_compress_messages(messages, current_tokens, focus_topic, *args):
+        assert other._warm_handoff_text() is None
+        if focus_topic == "outer-topic":
+            compressor.compress([], force=True, focus_topic="inner-topic", memory_context="inner-memory",
+                                prefix_request=inner)
+            completed = compressor._last_warm_handoff
+            assert completed["prompt_tokens"] == 22
+            assert outer.calls == []
+            assert compressor._warm_handoff_text() == HANDOFF
+            assert compressor._last_warm_handoff is completed
+        else:
+            assert compressor._warm_handoff_text() == HANDOFF
+            assert compressor._last_warm_handoff is None
+        assert compressor._warm_handoff_text() is None
+        return messages
+
+    monkeypatch.setattr(compressor, "_compress_messages", fake_compress_messages)
+    compressor.compress([], force=True, focus_topic="outer-topic", memory_context="outer-memory",
+                        prefix_request=outer)
+
+    assert compressor._last_warm_handoff["prompt_tokens"] == 11
+    assert compressor._warm_handoff_text() is None
+    assert len(outer.calls) == len(inner.calls) == 1
+    assert "outer-topic" in outer.calls[0] and "outer-memory" in outer.calls[0]
+    assert "inner-topic" not in outer.calls[0] and "inner-memory" not in outer.calls[0]
+    assert "inner-topic" in inner.calls[0] and "inner-memory" in inner.calls[0]
+    assert "outer-topic" not in inner.calls[0] and "outer-memory" not in inner.calls[0]
 
 
 def test_config_flag_reaches_the_settings():
