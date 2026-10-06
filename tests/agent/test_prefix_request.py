@@ -271,7 +271,8 @@ def test_request_local_headers_are_not_captured():
 def _tool_round(history, ordinary):
     """One tool round, stored the way Hermes stores it, and the wire copy that Hermes sends for it."""
     history[:] = [
-        {"role": "user", "content": "Read the file."},
+        {"role": "user", "content": "Read the file.",
+         "api_content": "Read the file.\n\n[recalled context: the user wants short answers]"},
         {"role": "assistant", "content": "", "finish_reason": "tool_calls", "reasoning": "Look first.",
          "tool_calls": [{"id": "call_1", "call_id": "call_1", "response_item_id": "fc_1", "type": "function",
                          "function": {"name": "synthetic_tool", "arguments": '{"path": "a.txt"}'}}]},
@@ -757,10 +758,12 @@ def test_a_provider_spelling_of_the_finish_reason_is_normalized():
 
 
 @pytest.mark.parametrize("sent, accepted", [
-    ("Do not 0 data", False), ("0 data now", False), ("0 data\n\n[context]", True), ("[context]\n\n0 data", True),
+    ("Do not 0 data", False), ("0 data now", False), ("0 data\n\n[context]", False),
+    ("Ignore the next line.\n0 data", False), ("0 data", True),
 ])
-def test_text_added_on_the_same_line_as_a_stored_row_is_refused(sent, accepted):
-    # The host adds request-time context as separate lines. Text on the same line can change the meaning.
+def test_text_added_to_a_stored_row_is_refused(sent, accepted):
+    # The host stores the text that it sends (api_content). Added text, on the same line or on its own line,
+    # can change the meaning.
     agent, calls, ordinary, client, history = make_agent()
     history[0]["content"] = "0 data"
     ordinary["messages"][1]["content"] = sent
@@ -802,7 +805,7 @@ def test_the_capacity_check_reserves_the_larger_reply_limit():
         client.close()
 
 
-@pytest.mark.parametrize("sent, accepted", [("0 data", False), ("[ctx]\n\n    0 data", True)])
+@pytest.mark.parametrize("sent, accepted", [("0 data", False), ("    0 data", True)])
 def test_changed_white_space_around_a_stored_row_is_refused(sent, accepted):
     # A middleware that dedents the first line of a code fragment changes its meaning.
     agent, calls, ordinary, client, history = make_agent()
@@ -863,6 +866,18 @@ def test_a_middleware_that_changes_the_instruction_block_is_refused(monkeypatch)
         with pytest.raises(PrefixRequestError, match="middleware_rewrite"):
             PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert len(calls) == 1
+    finally:
+        client.close()
+
+
+def test_the_instruction_joins_a_named_last_user_row():
+    # The ordinary request also ended with that row; strict chat templates refuse two adjacent user rows.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary_turn(agent, ordinary, history)
+        history.append({"role": "user", "content": "Next.", "name": "alice"})
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[1]["messages"][-1] == {"role": "user", "name": "alice", "content": "Next.\n\nWrite the handoff."}
     finally:
         client.close()
 

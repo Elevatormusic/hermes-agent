@@ -112,15 +112,6 @@ def _arguments(value):
     return "json", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-def _in_whole_lines(stored, sent):
-    """The stored text is in the sent text as whole lines, with its white space. The host adds request-time
-    context as separate lines (``"\n\n" + context``); text on the same line can change the meaning ("Delete A"
-    to "Do not Delete A"), and so can changed indentation."""
-    if not stored.strip():
-        return True
-    return re.search(r"(?:^|\n)" + re.escape(stored) + r"(?:\n|$)", sent) is not None
-
-
 def _same_row(wire, row):
     """The sent row carries the stored row: the same shape, the same name (the transport drops ``name`` from
     tool rows only), the stored text (``api_content`` when the row has it) inside the sent text (the host adds
@@ -131,7 +122,8 @@ def _same_row(wire, row):
         return False
     if wire.get("name") != row.get("name") and not (wire.get("name") is None and row.get("role") == "tool"):
         return False
-    if not _in_whole_lines(_text(_sent(row).get("content")), _text(wire.get("content"))):
+    # The host stores the text that it sends (api_content): other text is a rewrite, on its own line too.
+    if _text(_sent(row).get("content")) != _text(wire.get("content")):
         return False
     calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
                        if isinstance(c, dict)]
@@ -166,10 +158,11 @@ def _ends_with_instruction(row, instruction):
             and content[-1].get("type") == "text" and content[-1].get("text") == instruction)
 
 
-def _join_user_rows(rows):
-    """Join adjacent user rows of the same author as the main loop joins them (``_merge_user_content``): the
-    ordinary request has no adjacent user rows, and strict chat templates refuse them. The host instruction is
-    the last block of the last user row; it says that it comes from the host."""
+def _join_user_rows(rows, instruction):
+    """Join adjacent user rows of the same author as the main loop joins them (``_merge_user_content``), then
+    join the host instruction to the last user row (it keeps its name: the ordinary request also ended with that
+    row). The ordinary request has no adjacent user rows, and strict chat templates refuse them. The instruction
+    is the last block; it says that it comes from the host."""
     from agent.agent_runtime_helpers import _UNMERGEABLE, _merge_user_content
 
     out = []
@@ -182,7 +175,13 @@ def _join_user_rows(rows):
                 out[-1] = {**last, "content": joined}
                 continue
         out.append(row)
-    return out
+    last = out[-1] if out else None
+    if last is not None and last.get("role") == "user" and set(last) <= {"role", "content", "name"}:
+        joined = _merge_user_content(last.get("content"), instruction)
+        if joined is not _UNMERGEABLE:
+            out[-1] = {**last, "content": joined}
+            return out
+    return [*out, {"role": "user", "content": instruction}]
 
 
 def _same_request(base, request, count, instruction):
@@ -411,7 +410,7 @@ class PrefixRequest:
         # The server count of the captured request is exact; only the new rows are estimated.
         reported = ((capsule.get("usage") or {}).get("prompt_tokens"))
         self._prefix_tokens = reported or estimate_request_tokens_rough(body["messages"], tools=body.get("tools"))
-        added = _join_user_rows([*suffix, {"role": "user", "content": instruction}])
+        added = _join_user_rows(suffix, instruction)
         body["messages"] = [*body["messages"], *added]
         self._text_messages(body["messages"])
         body["stream"] = False
