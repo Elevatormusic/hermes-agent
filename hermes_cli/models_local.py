@@ -523,10 +523,13 @@ def ensure_lmstudio_model_loaded(
     explicit_context = _positive_int(target_context_length)
     if target_context_length is not None and explicit_context is None:
         return _result(None)
-    raw_models = _lmstudio_raw_models_or_none(api_key, base_url, 10) or []
+    from hermes_cli.models_lmstudio_instances import owned_instance, verified_instance_context
+    target_claim = owned_instance(server_root, model)
+    raw_models = _lmstudio_raw_models_or_none(api_key, base_url, 10)
+    if raw_models is None:
+        return _result(None)
     target_entry = _lmstudio_entry_for(raw_models, model)
-    from hermes_cli.models_lmstudio_instances import verified_instance_context
-    current_context = verified_instance_context(server_root, model, target_entry)
+    current_context = verified_instance_context(server_root, model, target_entry, expected_instance_id=target_claim)
     if target_entry is None:
         return _result(None)
 

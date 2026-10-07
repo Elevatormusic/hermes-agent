@@ -977,7 +977,7 @@ model:
 
 The setting also appears in Desktop Settings under Model. In `jit` mode Hermes does not load or unload instances, so this setting has no effect.
 
-Requests use the exact instance ID that Hermes loaded, including iteration-limit summary requests. The context budget comes from that same instance. If the catalog no longer lists it, Hermes clears the claim and uses the model name. A routed request that receives HTTP 404 also clears the claim and retries once with the model name.
+Requests use the exact instance ID that Hermes loaded, including iteration-limit summary requests. The context budget comes from that same instance. A failed catalog request keeps the claim. A valid catalog that no longer lists the instance clears it. A routed HTTP 404 also clears the failed claim. Hermes retries only after the catalog verifies the next context budget. The normal turn checks that budget before it retries. A summary retries once if its payload fits the verified budget.
 
 To change context length in LM Studio:
 

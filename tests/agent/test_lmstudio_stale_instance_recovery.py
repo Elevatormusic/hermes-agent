@@ -40,6 +40,7 @@ def test_transport_routes_owned_id_on_both_build_paths(claim):
 
 def test_summary_attempts_share_owned_wire_id(claim, monkeypatch):
     from agent import chat_completion_helpers as helpers
+    from agent.chat_completion_helpers_summary import chat_summary_attempt
     transport = _transport()
     calls = []
 
@@ -57,7 +58,7 @@ def test_summary_attempts_share_owned_wire_id(claim, monkeypatch):
         _get_transport=lambda: transport, _interruptible_api_call=lambda kwargs: None,
     )
     monkeypatch.setattr(helpers, "_managed_summary_call", execute)
-    attempt = helpers._chat_summary_attempt(agent, [{"role": "user", "content": "work"}], "summary-test")
+    attempt = chat_summary_attempt(agent, [{"role": "user", "content": "work"}], "summary-test")
     assert attempt(0) == ""
     assert attempt(1) == "summary"
     assert calls == ["owned-id", "owned-id"]
@@ -103,8 +104,13 @@ def test_routed_404_rebuilds_once_with_catalog_model(claim, monkeypatch):
     from hermes_cli.models_lmstudio_instances import recover_stale_instance
     retry = TurnRetryState()
     notices = []
+    from tests.agent.test_lmstudio_request_recovery import _agent
+    _catalog(monkeypatch, [{"id": "user-copy", "config": {"context_length": 4096}}])
+    runtime = _agent()
     agent = SimpleNamespace(
         provider="lmstudio", model=MODEL, base_url=BASE_URL, api_key="",
+        api_mode="chat_completions", context_compressor=runtime.context_compressor,
+        _effective_lmstudio_context_length=runtime._effective_lmstudio_context_length,
         thinking_callback=None, _extract_api_error_context=lambda error: {},
         _invoke_api_request_error_hook=lambda **kwargs: None, _buffer_vprint=notices.append,
     )
@@ -118,7 +124,8 @@ def test_routed_404_rebuilds_once_with_catalog_model(claim, monkeypatch):
         compression_attempts=0, max_compression_attempts=2, api_call_count=1,
         api_request_id="request-test", api_start_time=0, effective_task_id="test", turn_id="turn",
     )
-    assert verdict.action == "continue"
+    assert verdict.action == "break"
+    assert retry.restart_with_rebuilt_messages is True
     assert verdict.retry_count == 0
     assert retry.lmstudio_stale_instance_recovered is True
     assert owned_instance(ROOT, MODEL) is None
