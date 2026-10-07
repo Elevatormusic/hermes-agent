@@ -37,6 +37,7 @@ _DEFAULT_OUTPUT_RESERVE = 4096
 _HANDOFF_MIN_TOKENS, _HANDOFF_MAX_TOKENS = 2048, 8192
 _MAX_INSTRUCTION_BYTES = 65536
 _MAX_TIMEOUT_S = 600
+_CURRENT_CAPTURE = object()
 
 
 class PrefixRequestError(RuntimeError):
@@ -232,16 +233,26 @@ def enabled(agent):
 
 
 def _merged(kwargs):
-    """The request body that the SDK sends: kwargs with extra_body merged. Request-local headers and queries are
-    not supported."""
-    if kwargs.get("extra_query") or kwargs.get("extra_headers"):
+    """The SDK request body with extra_body merged. Only Relay's traceparent header is supported;
+    it stays outside the JSON body. Request-local queries are not supported."""
+    if kwargs.get("extra_query"):
         raise PrefixRequestError("request_options_unsupported")
+    _trace_headers(kwargs)
     extra = kwargs.get("extra_body") or {}
     if type(extra) is not dict:
         raise PrefixRequestError("request_options_unsupported")
     body = {k: v for k, v in kwargs.items() if k not in {"extra_body", "extra_headers", "extra_query", "timeout"}}
     body.update(extra)
     return body
+
+
+def _trace_headers(kwargs):
+    """Permit Relay's current traceparent header only; it is not part of the JSON prefix."""
+    headers = kwargs.get("extra_headers") or {}
+    if type(headers) is not dict or any(str(key).lower() != "traceparent" or type(value) is not str
+                                        for key, value in headers.items()):
+        raise PrefixRequestError("request_options_unsupported")
+    return headers
 
 
 def final_body(kwargs):
@@ -266,16 +277,18 @@ def begin_capture(agent, kwargs):
         body = final_body(kwargs)
         agent._prefix_capture = {"source": _row_digests(source), "route": _route(agent), "body": body,
                                  "body_digest": _digest(body)}
+        return agent._prefix_capture
     except (PrefixRequestError, TypeError, ValueError):
         # An unsupported capture must never stop an ordinary request.
         return
 
 
-def capture_response(agent, kwargs, response):
+def capture_response(agent, kwargs, response, *, capture=_CURRENT_CAPTURE):
     """Bind the capture to the response that this exact body produced. Streamed and plain responses."""
     if not enabled(agent):
         return response
-    capture = getattr(agent, "_prefix_capture", None)
+    if capture is _CURRENT_CAPTURE:
+        capture = getattr(agent, "_prefix_capture", None)
     try:
         if capture is None or _digest(_merged(kwargs)) != capture["body_digest"]:
             return response
@@ -518,24 +531,44 @@ class PrefixRequest:
             base = copy.deepcopy(body)
             send_lock = threading.RLock()
             send_active = True
+            physical_used = False
 
-            def _send(request):
+            def _send_physical(request):
+                nonlocal physical_used
                 # Client release must wait for a callback that has started its provider call.
                 with send_lock:
                     if not send_active:
                         raise PrefixRequestError("attempt_finished")
+                    if physical_used:
+                        raise PrefixRequestError("already_used")
                     # The captured part, settings, and instruction must stay unchanged.
-                    if not _same_request(base, request, count, instruction):
+                    final = _merged(request)
+                    if not _same_request(base, final, count, instruction):
                         raise PrefixRequestError("middleware_rewrite")
                     # An execution middleware can add text after the captured prefix.
-                    self._check_capacity(request, count)
+                    self._check_capacity(final, count)
                     # Check cancellation, route, history, and deadline at the provider boundary.
                     self._check()
+                    physical_used = True
                     # The SDK merges extra_body after its typed fields.
                     response = client.chat.completions.create(
-                        model=request["model"], messages=[], extra_body=request, timeout=self._deadline - time.monotonic())
+                        model=final["model"], messages=[], extra_body=final, extra_headers=_trace_headers(request),
+                        timeout=self._deadline - time.monotonic())
                     sent.append((response, _dump(response)))
                     return response
+
+            def _send(request):
+                # Relay can run the terminal callback on another thread. Do not hold the lock across Relay.
+                with send_lock:
+                    if not send_active:
+                        raise PrefixRequestError("attempt_finished")
+                from agent import relay_llm
+
+                return relay_llm.execute(
+                    request, _send_physical, session_id=str(agent.session_id or ""),
+                    name=str(agent.provider or "provider"), model_name=str(agent.model or ""),
+                    metadata={"api_mode": agent.api_mode, "api_request_id": None,
+                              "call_role": "auxiliary:compression", "auxiliary_task": "compression", "retry_count": 0})
             try:
                 # Like a main request, this request goes through llm_execution middleware (audit, policy).
                 try:
