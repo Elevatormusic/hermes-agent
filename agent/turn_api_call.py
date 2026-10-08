@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason
-from agent.agent_runtime_helpers import _INTERRUPTED_PLACEHOLDER
+from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
 from agent.message_metadata import append_message
 from agent.prefix_request import capture_response, publish_response
 from agent.prefix_request_capture import capture_main_request, main_capture_scope
@@ -32,7 +32,6 @@ def stop_thinking_spinner(agent: Any, thinking_spinner: Any) -> None:
         thinking_spinner.stop("")
     if agent.thinking_callback:
         agent.thinking_callback("")
-    return None
 
 
 @dataclass
@@ -207,10 +206,7 @@ def handle_api_interrupt(
         # The interrupted row is replayed next turn; looped bytes there re-seed the loop
         # (#112764). Same hidden shape as the redirect placeholder: nothing visible in the
         # transcript, a neutral api_content so the pre-call sanitizer does not re-heal it.
-        append_message(messages, {
-            "role": "assistant", "content": "", "display_kind": "hidden",
-            "api_content": _INTERRUPTED_PLACEHOLDER,
-        })
+        append_message(messages, hidden_interrupt_placeholder_row())
         final_response = REPETITION_LOOP_INTERRUPTED
     elif _partial:
         append_message(messages, {
@@ -232,7 +228,7 @@ class NousRateGuardVerdict:
     active_system_prompt: Any
     retry_count: Any
     compression_attempts: Any
-    result: Optional[Dict[str, Any]] = None
+    result: Optional[dict[str, Any]] = None
 
 
 def nous_rate_limit_guard(
@@ -243,7 +239,7 @@ def nous_rate_limit_guard(
     SDK retries) counts against RPH. Never lets the guard itself break the agent loop."""
     from agent.conversation_loop import _arm_fallback_restart
 
-    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> NousRateGuardVerdict:
+    def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> NousRateGuardVerdict:
         return NousRateGuardVerdict(
             action=action, active_system_prompt=active_system_prompt, retry_count=retry_count,
             compression_attempts=compression_attempts, result=result,

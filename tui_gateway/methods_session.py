@@ -123,10 +123,15 @@ def _session_row_summary(row: dict, *, tip_row: dict | None = None, resolved_id=
             "title": row.get("title") or "", "preview": tip_row.get("preview") or "",
             "started_at": row.get("started_at") or 0, "message_count": tip_row.get("message_count") or 0,
             "source": row.get("source") or "",
+            # Durable lineage root for compressed conversations — the same field REST
+            # projects (api_server._session_response); RPC consumers (desktop pinning /
+            # lineage dedup) group on it. #66663.
+            "_lineage_root_id": row.get("_lineage_root_id"),
             **({} if db is None else _live_count_field(db, row["id"] if resolved_id is None else resolved_id))}
 
 
 from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
 
 # Hidden from human listings (kanban workers, tool integrations, one-shot runs); see INTERNAL_LISTING_SOURCES.
 _LISTING_DENY_SOURCES = frozenset(INTERNAL_LISTING_SOURCES)
@@ -176,7 +181,7 @@ def _pet_emit(event: str, payload: dict, what: str) -> None:
     """Best-effort progress emit: a transport hiccup must never abort generation."""
     try:
         _emit(event, "", payload)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("%s emit failed: %s", what, exc)
 
 
@@ -195,7 +200,7 @@ def _pet_method(name: str, *, fail_open=None, slug: bool = False, scoped: bool =
                 if slug and not (value := _str_param(params, "slug")):
                     return _err(rid, 4004, "missing slug")
                 return fn(rid, params, value) if slug else fn(rid, params)
-            except Exception as exc:  # noqa: BLE001 - cosmetic surface
+            except Exception as exc:
                 logger.debug("%s failed: %s", name, exc)
                 if fail_open is not None:
                     return _ok(rid, fail_open(params) if callable(fail_open) else dict(fail_open))
@@ -396,14 +401,10 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
                 return _err(rid, 4008, f"nothing to branch — {exc}")
         history = _visible_branch_history(display_history)
         if not history:
-            return _err(rid, 4008, "nothing to branch — send a message first")
-    # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback is "No workspace".
-    explicit_cwd = False
-    raw_cwd = _str_param(params, "cwd")  # unguarded, as on BASE: only the path check is best-effort
-    # An ssh profile's cwd lives on the remote host, where the host isdir check cannot vouch for it.
-    remote_cwd = bool(raw_cwd) and _is_remote_cwd_shape(raw_cwd) and _cwd_is_remote(profile_home)
-    with contextlib.suppress(Exception):
-        explicit_cwd = bool(raw_cwd) and (remote_cwd or os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd))))
+            return _err(rid, 4008, "send a message first")
+    # Only a chosen workspace persists as cwd; the launch-dir fallback is "No workspace"
+    # (#108205: the desktop arm lets the client vouch for a host-invisible path, #52589 provenance).
+    explicit_cwd, session_cwd, remote_cwd = _resolve_create_cwd(params, source, profile_home)
     _enable_gateway_prompts()
     from .methods_session_model_guard import create_overrides
     try:
@@ -427,7 +428,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "explicit_cwd": explicit_cwd,
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
             "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
-            "cwd": _completion_cwd(params), "inflight_turn": None, "last_active": now,
+            "cwd": session_cwd, "inflight_turn": None, "last_active": now,
             "model_override": session_model_override,
             "composer_override_profile": composer_override_profile,
             "create_reasoning_override": create_reasoning_override,
@@ -1071,16 +1072,17 @@ def _(rid, params: dict) -> dict:
             return resp
         ctx.profile_resume_cwd = (_resumable_stored_cwd(_str_param(ctx.found, "cwd"), ctx.profile_home)
                                   or _profile_workspace_cwd(ctx.profile_home))
-        # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime).
-        with _session_resume_lock:
+        with _session_resume_lock:  # fast path: reuse a session live IN THIS PROFILE, never another's
             live = _find_live_session_by_key(ctx.target, ctx.profile_home)
         if live is not None:
             return _resume_reuse_live(ctx, *live)
+        from hermes_state import SessionDB
+        from tools.approval_yolo import restore_session_yolo  # a fresh backend starts with an empty set
+        restore_session_yolo(ctx.target, SessionDB.session_yolo_enabled(ctx.found))
         if ctx.lazy:
             return _resume_lazy(ctx)
-        if ctx.eager_build:
-            return _resume_eager(ctx)
-        return _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
+        return _resume_eager(ctx) if ctx.eager_build else (
+            _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx))
     finally:
         # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF (atexit.register) once its
         # background token writer starts; only close() unregisters.
@@ -1608,7 +1610,7 @@ def _(rid, params: dict) -> dict:
                 # No popularity metric; petdex's hand-picked set (by asset path) is closest.
                 "curated": "/curated/" in entry.spritesheet_url,
                 "generated": entry.slug in installed and installed[entry.slug].generated})
-    except Exception as exc:  # noqa: BLE001 - offline: fall back to installed
+    except Exception as exc:
         logger.debug("pet.gallery manifest fetch failed: %s", exc)
     seen = {item["slug"] for item in gallery}
     gallery.extend(
@@ -1647,7 +1649,7 @@ def _pet_config_followup(what: str, fn, *args) -> None:
     """Best-effort ``hermes_cli.pets`` active-slug update after a store op that already succeeded."""
     try:
         fn(*args)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("%s config update failed: %s", what, exc)
 
 
@@ -1722,7 +1724,7 @@ def _(rid, params: dict) -> dict:
         available = False
     try:
         providers = list_sprite_providers()
-    except Exception as exc:  # noqa: BLE001 - picker is best-effort
+    except Exception as exc:
         logger.debug("pet provider list failed: %s", exc)
     return _ok(rid, {"available": available, "providers": providers})
 
@@ -1772,7 +1774,7 @@ def _(rid, params: dict) -> dict:
         try:
             shutil.copyfile(src, dest)
             data_uri = _pet_png_data_uri(dest)
-        except Exception as exc:  # noqa: BLE001 - skip a bad draft, keep the rest
+        except Exception as exc:
             logger.debug("pet.generate draft %d failed: %s", index, exc)
             return
         out.append({"index": index, "dataUri": data_uri})
@@ -2201,153 +2203,7 @@ def _(rid, params: dict, session: dict) -> dict:
 def _(rid, params: dict) -> dict:
     with _session_resume_lock:  # lock only the ownership claim; finalization must not block resumes
         session = _pop_session_by_id(params.get("session_id", ""))
-    return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close")})
-
-
-# ── session.branch ───────────────────────────────────────────────────
-def _visible_branch_history(messages) -> list:
-    """user/assistant rows with visible text, as FULL copies (reasoning + timeline-marker tags survive)."""
-    return [dict(message) for message in messages or []
-            if isinstance(message, dict) and message.get("role") in {"user", "assistant"}
-            and _coerce_message_text(message.get("content")).strip()]
-
-
-def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list, source: str):
-    """Build + register the branched agent in the parent's profile; the DEDICATED db handle is ours until
-    ``_transfer_db_to_agent`` (released here on failure)."""
-    parent_home = session.get("profile_home")
-    parent_user_id = _session_auth_user_id(session)
-    branch_db, branch_owns_db = _profile_session_db(parent_home) if parent_home else (None, False)
-    try:
-        with _profile_build_scope(parent_home):
-            agent = _make_agent_in_context(new_sid, new_key, session_db=branch_db, platform_override=source,
-                                           cwd_override=_session_cwd(session),
-                                           context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session),
-                                           auth_user_id=parent_user_id)
-            _init_session(new_sid, new_key, agent, list(history), cols=session.get("cols", 80),
-                          cwd=_session_cwd(session), session_db=branch_db, source=source, profile_home=parent_home,
-                          explicit_cwd=bool(session.get("explicit_cwd")))
-            _transfer_db_to_agent(agent, branch_db)
-            branch_owns_db = False
-        if new_sid in _sessions:
-            _sessions[new_sid]["active_session_lease"] = None  # claimed lazily on the first turn
-            _sessions[new_sid]["auth_user_id"] = parent_user_id
-            # The parent's STORED key: the idempotent-hit reply for a retried
-            # session.branch answers the same ``parent`` as the fresh path, and
-            # later readers (lineage, retry) get the linkage from the runtime.
-            _sessions[new_sid]["parent_session_id"] = session.get("session_key")
-        return agent
-    finally:
-        if branch_owns_db and branch_db is not None:
-            _release_db(branch_db)
-
-
-_BRANCH_COPY_FIELDS = (
-    "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items",
-    # Timeline markers ride as role=user; untagged they become bare user turns after a restart, corrupting
-    # the truncate ordinal address space.
-    "display_kind", "display_metadata",
-    # Branch copies are history, not new activity: keep the parent's timestamps.
-    "timestamp")
-
-
-def _branch_source_history(db, session: dict, old_key: str) -> list:
-    """Rows a branch copies: the persisted DISPLAY projection reconciled with live memory (live history is
-    the MODEL projection — post-compaction summary + tail — the child would lose every archived turn)."""
-    with session["history_lock"]:
-        in_memory_history = [
-            dict(msg) for msg in list(session.get("display_history_prefix") or []) + list(session.get("history", []))
-            if isinstance(msg, dict)]
-    history = None
-    if callable(get_resume_conversations := getattr(db, "get_resume_conversations", None)):
-        try:
-            _, display_history = get_resume_conversations(old_key)
-            history = _visible_branch_history(_reconcile_display_with_live(display_history, in_memory_history))
-        except Exception:
-            logger.debug("branch display projection read failed", exc_info=True)
-    return history or _visible_branch_history(in_memory_history)
-
-
-def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = False) -> dict:
-    # Idempotency (#65410, same registry as session.create): a client retrying a
-    # branch whose first response was lost gets the SAME child, not a duplicate.
-    idem_key = _str_param(params, "idempotency_key") or None
-    if idem_key is not None:
-        with _sessions_lock:
-            now_gc = time.time()
-            existing_sid, ts = _idempotency_keys.get(idem_key, (None, 0.0))
-            if existing_sid is not None and existing_sid in _sessions:
-                if now_gc - ts <= _IDEMPOTENCY_KEY_TTL:
-                    # Refresh the TTL so back-to-back retries don't age out mid-flight.
-                    _idempotency_keys[idem_key] = (existing_sid, now_gc)
-                    return _ok(rid, _branch_idempotent_hit(existing_sid, _sessions[existing_sid], omit_messages))
-                _idempotency_keys.pop(idem_key, None)
-            # Stale key (child closed) or first attempt: fall through to a fresh
-            # branch, which re-registers the key below.
-    # Write into the parent's profile-scoped state.db; the launch handle would orphan rows.
-    with _session_db(session) as db:
-        if db is None:
-            return _db_unavailable_error(rid, code=5008)
-        old_key = session["session_key"]
-        history = _branch_source_history(db, session, old_key)
-        if not history:
-            return _err(rid, 4008, "nothing to branch — send a message first")
-        if isinstance(count := params.get("count"), int) and count > 0:
-            history = history[:count]
-        new_key, new_sid, source = _new_session_key(), uuid.uuid4().hex[:8], _session_source(session)
-        try:
-            title = params.get("name", "") or _branch_title(db, old_key)
-            home = session.get("profile_home")
-            _persist_branch(db, new_key, old_key, title, history, source=source,
-                            cwd=None if _is_remote_launch_cwd(session) else _session_cwd(session),
-                            profile_name=profile_name_for_home(home) or _current_profile_name(),
-                            model=_session_default_route(session)[0], copy_fields=_BRANCH_COPY_FIELDS,
-                            title_source="user" if params.get("name") else "derived",
-                            user_id=_session_auth_user_id(session))
-        except Exception as e:
-            return _err(rid, 5008, f"branch failed: {e}")
-    try:
-        agent = _build_branch_agent(session, new_sid, new_key, history, source)
-    except Exception as e:
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    if idem_key is not None:
-        with _sessions_lock:
-            _idempotency_keys[idem_key] = (new_sid, time.time())
-            # The fresh reply's title, so an idempotent hit answers the SAME one
-            # without a DB round-trip.
-            if new_sid in _sessions:
-                _sessions[new_sid]["branch_title"] = title
-    response = {"session_id": new_sid, "stored_session_id": new_key, "title": title, "parent": old_key,
-                "message_count": len(history), "info": _session_info(agent, _sessions.get(new_sid))}
-    if omit_messages:
-        response["messages_omitted"] = True
-    else:
-        response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
-    return _ok(rid, response)
-
-
-def _branch_idempotent_hit(existing_sid: str, session: dict, omit_messages: bool) -> dict:
-    """The SAME result shape a fresh ``_branch_live`` returns for the existing child."""
-    history = session.get("history") or []
-    key = session.get("session_key") or ""
-    response = {"session_id": existing_sid, "stored_session_id": key,
-                "title": session.get("branch_title") or _branch_title_for(session),
-                "parent": session.get("parent_session_id"), "message_count": len(history),
-                "info": _fallback_session_info(session)}
-    if omit_messages:
-        response["messages_omitted"] = True
-    else:
-        response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
-    return response
-
-
-def _branch_title_for(session: dict) -> str:
-    """The child's persisted title from its stored row, best-effort."""
-    with contextlib.suppress(Exception):
-        with _session_db(session) as db:
-            if db is not None:
-                return db.get_session_title(session.get("session_key") or "") or ""
-    return ""
+    return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close"), "messages": list((session or {}).get("_end_msgs") or [])})
 
 
 @_session_method("session.branch", live=True)
@@ -2359,10 +2215,6 @@ def _(rid, params: dict, session: dict) -> dict:
 def _(rid, params: dict, session: dict) -> dict:
     """Whole-history ``session.branch`` that doesn't echo the copied transcript back."""
     return _branch_live(rid, params, session, omit_messages=True)
-
-
-
-
 
 
 # ── delegation / spawn trees ─────────────────────────────────────────
@@ -2506,5 +2358,7 @@ def _(rid, params: dict) -> dict:
 def register(server) -> None:
     """Publish this module's helpers onto ``server`` (rebound to its globals) and install handlers."""
     bind_module(globals(), server, skip=("_",))
+    from . import methods_session_branch
+    methods_session_branch.register(server)
     from . import methods_session_interrupt
     methods_session_interrupt.register(server)
