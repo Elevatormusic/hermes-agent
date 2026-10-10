@@ -1,3 +1,4 @@
+import { arUpdateChannel } from './ar_update_channel'
 import type { TranslationOverrides } from './define-locale'
 
 export const arSettings = {
@@ -509,7 +510,8 @@ export const arSettings = {
         'عندما يحدّث Hermes نفسه من التطبيق دون موجه طرفية، احتفظ بتعديلات المصدر المحلية أو تجاهلها.'
     },
     about: {
-      updates: 'التحديثات'
+      updates: 'التحديثات',
+      channel: arUpdateChannel
     },
 
     config: {

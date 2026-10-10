@@ -9,6 +9,7 @@ import { deNotices } from './de_notices'
 import { deOnboarding } from './de_onboarding'
 import { deProjects } from './de_projects'
 import { deSharedMetrics } from './de_shared_metrics'
+import { deUpdateChannel } from './de_update_channel'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introDe } from './intro-de'
 
@@ -1533,9 +1534,7 @@ export const deOverrides = {
       screenRecording: 'Bildschirmaufnahme',
       driverHealth: 'Treiberstatus'
     },
-    about: {
-      updates: 'Updates'
-    },
+    about: { updates: 'Updates', channel: deUpdateChannel },
     config: {
       minimizeToTrayTitle: 'In den Infobereich minimieren',
       minimizeToTrayDesc:
@@ -3974,11 +3973,6 @@ export const deOverrides = {
     editingQueuedInComposer: 'Bearbeitet eingereihten Turn im Composer',
     restoredDraftNotice: 'Ihre nicht gesendete Nachricht wurde wiederhergestellt',
     restoredDraftUndo: 'Rückgängig',
-    localSetup: {
-      title: 'Das könnte auf Ihrem Computer laufen',
-      text: (model: string) => `${model} passt auf diesen Rechner. Kostenlos, und Chats bleiben auf Ihrem Computer.`,
-      action: 'Zeigen'
-    },
     queueEdit: 'Bearbeiten',
     queueExpand: 'Ausklappen',
     queueCollapse: 'Einklappen',

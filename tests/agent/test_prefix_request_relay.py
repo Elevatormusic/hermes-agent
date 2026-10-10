@@ -121,7 +121,7 @@ def test_relay_execution_cannot_send_a_warm_request_twice(relay_turn):
     agent.session_id = "session-1"
     errors = []
 
-    async def duplicate(name, request, next_call):
+    async def duplicate(name, request, context, next_call):
         first = await next_call(request)
         try:
             await next_call(request)
