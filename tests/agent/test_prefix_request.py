@@ -1,6 +1,7 @@
 """One same-prefix request for compaction: capture, request shape, and refusals, with a real SDK sink."""
 
 import copy
+import itertools
 import json
 from types import SimpleNamespace
 
@@ -92,7 +93,7 @@ def test_request_keeps_the_prefix_and_settings_and_appends_reply_and_instruction
 def test_cached_tokens_are_reported_when_the_server_sends_them():
     usage = {"prompt_tokens": 5000, "completion_tokens": 5, "total_tokens": 5005,
              "prompt_tokens_details": {"cached_tokens": 4864}}
-    agent, calls, ordinary, client, history = make_agent(usage=usage)
+    agent, _calls, ordinary, client, history = make_agent(usage=usage)
     try:
         ordinary_turn(agent, ordinary, history)
         result = PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
@@ -154,7 +155,7 @@ def test_refuses_before_any_request(change, reason):
 
 
 def test_refuses_without_a_successful_capture():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, calls, _ordinary, client, history = make_agent()
     try:
         history.append({"role": "assistant", "content": REPLY})
         with pytest.raises(PrefixRequestError, match="no_capture"):
@@ -220,7 +221,7 @@ def test_the_capacity_check_uses_the_reported_prompt_count():
 
 
 def test_capture_age_is_known_after_a_capture():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
     try:
         ordinary_turn(agent, ordinary, history)
         assert 0 <= PrefixRequest(agent, history).capture_age_s < 60
@@ -229,7 +230,7 @@ def test_capture_age_is_known_after_a_capture():
 
 
 def test_cache_read_tokens_is_unknown_without_a_capture():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, _ordinary, client, history = make_agent()
     try:
         assert PrefixRequest(agent, history).cache_read_tokens is None
         assert PrefixRequest(agent, history).capture_age_s is None
@@ -251,7 +252,7 @@ def test_a_cancelled_fence_refuses():
 
 
 def test_no_capture_unless_the_engine_asks_for_it():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, _history = make_agent()
     try:
         agent.context_compressor.wants_prefix_request = False
         begin_capture(agent, ordinary)
@@ -261,7 +262,7 @@ def test_no_capture_unless_the_engine_asks_for_it():
 
 
 def test_request_local_headers_are_not_captured():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, _history = make_agent()
     try:
         begin_capture(agent, {**ordinary, "extra_headers": {"x-initiator": "user"}})
         assert getattr(agent, "_prefix_capture", None) is None
@@ -324,7 +325,7 @@ def test_a_request_with_other_rows_is_refused(change):
 
 
 def _execution_middleware(monkeypatch, *callbacks):
-    import hermes_cli.plugins as plugins
+    from hermes_cli import plugins
     manager = SimpleNamespace(_middleware={"llm_execution": list(callbacks)},
                               _report_hook_failure=lambda *args, **kwargs: None)
     monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
@@ -404,7 +405,7 @@ def test_rows_with_an_api_content_sidecar_are_sent_as_the_main_loop_sends_them()
 
 
 def test_a_sent_row_that_is_not_the_stored_api_content_is_refused():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
     try:
         history[1]["api_content"] = "The answer is 4."
         ordinary["messages"][2]["content"] = "The answer is 5." + history[1]["content"]
@@ -421,7 +422,7 @@ def test_the_request_runs_through_the_request_middleware(monkeypatch):
     def redact(request=None, **context):
         seen.append(context.get("purpose"))
         return {"request": json.loads(json.dumps(request).replace("SECRET", "[redacted]"))}
-    import hermes_cli.plugins as plugins
+    from hermes_cli import plugins
     manager = SimpleNamespace(
         _middleware={"llm_request": [redact]}, has_middleware=lambda kind: kind == "llm_request",
         invoke_middleware=lambda kind, **kwargs: [redact(**kwargs)] if kind == "llm_request" else [],
@@ -460,7 +461,7 @@ def test_appended_assistant_rows_get_reasoning_content_like_a_main_request():
 
 def test_changed_white_space_inside_a_sent_row_is_refused():
     # White space is API-visible: it can change code, tables, or commands.
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
     try:
         history[0]["content"] = "def f():\n    return 1"
         ordinary["messages"][1]["content"] = "def f():\n  return 1"
@@ -472,7 +473,7 @@ def test_changed_white_space_inside_a_sent_row_is_refused():
 
 
 def test_a_replacement_reply_from_execution_middleware_is_refused(monkeypatch):
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
 
     def replace(request=None, next_call=None, **context):
         return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(
@@ -513,7 +514,7 @@ def test_a_request_middleware_that_changes_the_captured_part_is_refused(monkeypa
     # The captured request already went through llm_request middleware; a second pass would apply it twice.
     def prepend(request=None, **context):
         return {"request": {**request, "messages": [{"role": "system", "content": "policy"}, *request["messages"]]}}
-    import hermes_cli.plugins as plugins
+    from hermes_cli import plugins
     manager = SimpleNamespace(
         _middleware={"llm_request": [prepend]}, has_middleware=lambda kind: kind == "llm_request",
         invoke_middleware=lambda kind, **kwargs: [prepend(**kwargs)] if kind == "llm_request" else [],
@@ -530,7 +531,7 @@ def test_a_request_middleware_that_changes_the_captured_part_is_refused(monkeypa
 
 
 def test_a_changed_api_content_sidecar_is_a_changed_history():
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
     try:
         history[0]["api_content"] = "[a]" + history[0]["content"]
         ordinary["messages"][1]["content"] = history[0]["api_content"]
@@ -554,12 +555,24 @@ def test_the_stop_setting_is_not_sent():
         client.close()
 
 
+def test_the_llamacpp_prompt_progress_option_is_not_sent():
+    # llama-server sends prompt progress only in a stream; the warm request does not stream.
+    agent, calls, ordinary, client, history = make_agent()
+    try:
+        ordinary["extra_body"] = {"return_progress": True}
+        ordinary_turn(agent, ordinary, history)
+        PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
+        assert calls[0]["return_progress"] is True and "return_progress" not in calls[1]
+    finally:
+        client.close()
+
+
 def test_capacity_is_checked_again_after_the_request_middleware(monkeypatch):
     def expand(request=None, **context):
         # The rows after the capture can change; the instruction (the last row) cannot.
         request["messages"][-2]["content"] += " context" * 100_000
         return {"request": request}
-    import hermes_cli.plugins as plugins
+    from hermes_cli import plugins
     manager = SimpleNamespace(
         _middleware={"llm_request": [expand]}, has_middleware=lambda kind: kind == "llm_request",
         invoke_middleware=lambda kind, **kwargs: [expand(**kwargs)] if kind == "llm_request" else [],
@@ -577,7 +590,7 @@ def test_capacity_is_checked_again_after_the_request_middleware(monkeypatch):
 
 def test_a_changed_json_type_in_arguments_is_refused():
     # true and 1 are different on the wire; Python == does not see it.
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, history = make_agent()
     try:
         _tool_round(history, ordinary)
         history[1]["tool_calls"][0]["function"]["arguments"] = '{"path": "a.txt", "force": true}'
@@ -624,7 +637,7 @@ def test_the_native_carrier_of_the_provider_profile_is_replayed(monkeypatch):
 
 
 def _request_middleware(monkeypatch, callback):
-    import hermes_cli.plugins as plugins
+    from hermes_cli import plugins
     manager = SimpleNamespace(
         _middleware={"llm_request": [callback]}, has_middleware=lambda kind: kind == "llm_request",
         invoke_middleware=lambda kind, **kwargs: [callback(**kwargs)] if kind == "llm_request" else [],
@@ -789,7 +802,7 @@ def test_the_handoff_has_its_own_reply_limit(main, sent):
 def test_a_provider_spelling_of_the_finish_reason_is_normalized():
     # Some OpenAI-compatible servers send STOP. The transport normalizes it for a main request; the capture and
     # the warm reply do not go through the transport.
-    agent, calls, ordinary, client, history = make_agent(finish="STOP")
+    agent, _calls, ordinary, client, history = make_agent(finish="STOP")
     try:
         ordinary_turn(agent, ordinary, history)
         result = PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
@@ -873,7 +886,7 @@ def test_no_two_adjacent_user_rows_are_sent():
         PrefixRequest(agent, history)("Write the handoff.", timeout_s=30)
         assert calls[1]["messages"][-1] == {"role": "user", "content": "First.\n\nSecond.\n\nWrite the handoff."}
         roles = [row["role"] for row in calls[1]["messages"]]
-        assert not any(a == b == "user" for a, b in zip(roles, roles[1:]))
+        assert not any(a == b == "user" for a, b in itertools.pairwise(roles))
     finally:
         client.close()
 
@@ -1016,7 +1029,6 @@ def test_execution_middleware_cannot_send_after_the_attempt_returns(monkeypatch)
 
     def defer(request=None, next_call=None, **context):
         stored.append(next_call)
-        return None
 
     agent, calls, ordinary, client, history = make_agent()
     try:

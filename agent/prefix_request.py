@@ -127,7 +127,7 @@ def _same_row(wire, row):
     # The host stores the text that it sends (api_content): other text is a rewrite, on its own line too.
     if _text(_sent(row).get("content")) != _text(wire.get("content")):
         return False
-    calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []  # noqa: E731
+    calls = lambda r: [_arguments((c.get("function") or {}).get("arguments")) for c in r.get("tool_calls") or []
                        if isinstance(c, dict)]
     return calls(wire) == calls(row)
 
@@ -330,7 +330,7 @@ def _usage(response):
     raw = raw if isinstance(raw, dict) else {}
     details = raw.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
-    count = lambda value: value if type(value) is int and value >= 0 else None  # noqa: E731
+    count = lambda value: value if type(value) is int and value >= 0 else None
     # A missing cached-token count is unknown, not zero.
     return {"prompt_tokens": count(raw.get("prompt_tokens")), "completion_tokens": count(raw.get("completion_tokens")),
             "cache_read_tokens": count(cached)}
@@ -455,6 +455,8 @@ class PrefixRequest:
         self._text_messages(body["messages"])
         body["stream"] = False
         body.pop("stream_options", None)
+        # llama-server sends prompt progress only in a stream (upstream with_prompt_progress).
+        body.pop("return_progress", None)
         # A stop sequence of the main request could cut the handoff after its headings.
         body.pop("stop", None)
         # A web search costs a search and can bring text that is not in the conversation into the handoff.

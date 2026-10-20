@@ -38,7 +38,7 @@ _WARM_HANDOFF_TIMEOUT_S = 120.0
 WARM_HANDOFF_AUTO_MAX_AGE_S = 300.0
 # A stalled compression can overlap another attempt on the same compressor.
 # Keep each worker's request, focus and memory in its own context.
-_WARM_HANDOFF_ATTEMPT: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+_WARM_HANDOFF_ATTEMPT: ContextVar[Optional[dict[str, Any]]] = ContextVar(
     "hermes_warm_handoff_attempt", default=None
 )
 WARM_HANDOFF_INSTRUCTION = """\
@@ -92,7 +92,7 @@ class WarmHandoffMixin:
         self._last_warm_handoff = None
 
     @staticmethod
-    def _warm_handoff_refusal(reply: Dict[str, Any]) -> Optional[str]:
+    def _warm_handoff_refusal(reply: dict[str, Any]) -> Optional[str]:
         """Return why a warm reply cannot be the summary text, or None when it is accepted."""
         from agent.context_compressor import _SUMMARY_END_MARKER, LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX
         from agent.context_compressor_refusal import _is_summary_refusal
@@ -222,9 +222,9 @@ class WarmHandoffMixin:
         return None
 
     def compress(
-        self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None, focus_topic: Optional[str] = None,
+        self, messages: list[dict[str, Any]], current_tokens: Optional[int] = None, focus_topic: Optional[str] = None,
         force: bool = False, memory_context: str = "", bypass_cooldown: bool = False, prefix_request: Any = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Compress like ``_compress_messages``. ``prefix_request`` is the host's optional one-shot same-prefix
         request (``agent.prefix_request.PrefixRequest``). With ``warm_handoff`` on (or auto and its checks pass),
         a manual or automatic compression asks it for the summary text first and falls back to the auxiliary

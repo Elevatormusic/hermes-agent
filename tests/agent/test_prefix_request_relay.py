@@ -161,7 +161,7 @@ def test_stream_capture_uses_its_own_physical_token(relay_turn):
     from agent import relay_llm
 
     relay, _ = relay_turn
-    agent, calls, ordinary, client, history = make_agent()
+    agent, _calls, ordinary, client, _history = make_agent()
     agent.session_id = "session-1"
     stores = []
     driver = SimpleNamespace(agent=agent, last_chunk_time={},
@@ -201,7 +201,7 @@ def test_stream_capture_uses_its_own_physical_token(relay_turn):
 def test_capture_scope_is_off_when_the_engine_does_not_ask_for_it():
     from agent.prefix_request_capture import capture_main_request
 
-    agent, calls, ordinary, client, history = make_agent()
+    agent, calls, ordinary, client, _history = make_agent()
     agent.context_compressor.wants_prefix_request = False
     try:
         with main_capture_scope(agent):
