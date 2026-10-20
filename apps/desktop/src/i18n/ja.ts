@@ -4,6 +4,7 @@ import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introJa } from './intro-ja'
 import { jaCompressionFieldDescriptions, jaCompressionFieldLabels } from './ja_compression'
 import { jaBoot } from './ja_boot'
+import { jaCatalog, jaSkillDeepLink } from './ja_catalog'
 import { jaClarify } from './ja_clarify'
 import { jaConnectors } from './ja_connectors'
 import { jaFirstRun } from './ja_first_run'
@@ -19,6 +20,8 @@ import { jaThemePicker } from './ja_theme_picker'
 import { jaUpdateChannel } from './ja_update_channel'
 
 export const jaOverrides = {
+
+  catalog: jaCatalog,
   connectors: jaConnectors.connectors,
   externalOpenFailed: {
     title: 'このリンクを開けませんでした',
@@ -182,15 +185,6 @@ export const jaOverrides = {
   },
 
   ...jaNotices,
-
-  billingBlock: {
-    titleNous: 'Nous クレジットが不足しています',
-    titleProvider: provider => `クレジット不足 — ${provider}`,
-    fallbackMessage: 'アカウントのクレジットが不足しています。続行するにはクレジットを追加してください。',
-    openBilling: '請求を開く',
-    addCredits: 'クレジットを追加',
-    dismiss: '閉じる'
-  },
 
   sendDiagnostics: {
     title: 'Nous に診断情報を送信',
@@ -1305,19 +1299,7 @@ export const jaOverrides = {
     }
   },
 
-  skillDeepLink: {
-    installTitle: (name: string) => `「${name}」をインストールしますか？`,
-    installDescription:
-      'このスキルは新しいセッションで利用できます。信頼できる提供元からのみインストールしてください。',
-    installTo: 'インストール先',
-    thisComputer: 'このコンピューター',
-    installing: 'インストール中…',
-    installComplete: (name: string) => `「${name}」をインストールしました`,
-    destinationChanged:
-      'インストール先が変更されました。このダイアログを閉じ、インストールリンクを開き直してください。',
-    installed: 'インストール済み',
-    source: '提供元'
-  },
+  skillDeepLink: jaSkillDeepLink,
   skills: {
     plugins: {
       pageBlurb:
@@ -3361,6 +3343,10 @@ export const jaOverrides = {
           title: '安全な接続に失敗しました',
           body: provider =>
             `Hermes は ${provider} との安全な接続を検証できませんでした。ネットワークやプロキシの設定を確認するか、プロバイダーを切り替えて再送してください。`
+        },
+        cron_session_read_only: {
+          title: 'このチャットはスケジュールされたジョブ用です',
+          body: 'このチャットはそのジョブの実行専用のため、メッセージは実行されませんでした。送信するには新しいチャットを開始してください。'
         }
       },
       errorLayers: {
