@@ -1086,18 +1086,19 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
     # cwd/env overlay are embedded as JSON literals in the watcher source (no extra argv plumbing).
     watcher = textwrap.dedent(
         """
+        import sys
+        if sys.path[:1] == [""]: del sys.path[0]  # -c puts the cwd first: never import from it
         import os
         import subprocess
-        import sys
         import time
-        # Stdlib-only imports: the watcher runs on the updater's interpreter, which after the
-        # package-manager handoff is the bare store Python without the dependency environment.
-        # ``-c`` only puts the cwd on sys.path, so name the checkout explicitly.
+        # Stdlib-only imports: after the package-manager handoff this is the bare store Python;
+        # name the checkout explicitly.
         sys.path.insert(0, {project_root_literal})
         from hermes_cli._subprocess_compat import (
             _WINDOWS_GATEWAY_BREAKAWAY_ENV, pid_exists_stdlib, windows_detach_flags,
             windows_detach_flags_without_breakaway,
         )
+        from hermes_cli.gateway_launchd_runtime import start_gateway_job
 
         pid = int(sys.argv[1])
         cmd = sys.argv[2:]
@@ -1110,9 +1111,8 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
                 break
             time.sleep(0.2)
 
-        # Route the respawned gateway's stray stdout/stderr to the same sidecar log _spawn_detached
-        # uses: with DEVNULL a gateway killed moments after respawn (parent Job Object teardown when
-        # breakaway is denied) left ZERO trace. Best-effort: DEVNULL when the log dir is unavailable.
+        # Respawned stdout/stderr go to _spawn_detached's sidecar log: with DEVNULL a gateway killed moments
+        # after respawn (Job Object teardown when breakaway is denied) left ZERO trace. Best-effort.
         _stdio_target = subprocess.DEVNULL
         _stdio_fh = None
         try:
@@ -1125,13 +1125,10 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
         except Exception:
             pass
 
-        # Platform-appropriate detach for the respawned gateway: POSIX start_new_session (setsid);
-        # Windows needs explicit creationflags. CREATE_BREAKAWAY_FROM_JOB is critical: the watcher may
-        # itself sit inside a job object (Electron/Tauri parent) and without breakaway the respawned
-        # gateway dies when that job tears down. See _subprocess_compat.windows_detach_flags().
+        # Detach the respawn: POSIX setsid; Windows needs CREATE_BREAKAWAY_FROM_JOB, since the watcher may sit in a job
+        # object (Electron/Tauri parent) whose teardown would otherwise kill it (_subprocess_compat.windows_detach_flags).
         _popen_kwargs = {{"stdout": _stdio_target, "stderr": _stdio_target}}
-        # Anchor at the stable working dir and overlay the env (VIRTUAL_ENV / PYTHONPATH /
-        # HERMES_HOME) the windowless base interpreter needs to import hermes_cli. Empty on POSIX.
+        # Stable cwd + env overlay (VIRTUAL_ENV/PYTHONPATH/HERMES_HOME) the windowless interpreter needs; empty on POSIX.
         if _respawn_cwd:
             _popen_kwargs["cwd"] = _respawn_cwd
         _base_env = {{**os.environ, **_respawn_env_overlay}}
@@ -1150,6 +1147,9 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
                     _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
                     _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
                     subprocess.Popen(cmd, **_popen_kwargs)
+            elif sys.platform == "darwin" and _stdio_fh and start_gateway_job(
+                    cmd, env=_base_env, cwd=os.getcwd(), log_path=_log_dir / "gateway-stdio.log"):
+                pass  # a launchd job: its LAN access outlives whoever ran this one
             else:
                 if _respawn_env_overlay:
                     _popen_kwargs["env"] = _base_env
@@ -5387,8 +5387,8 @@ def _stop_host_multiplexer(owner) -> int:
         return 0
 
 
-def _restart_all(system: bool) -> None:
-    from hermes_cli.gateway_profile_lifecycle import host_scope_for_all_verb
+def _restart_all(system: bool, detach: bool = False) -> None:
+    from hermes_cli.gateway_profile_lifecycle import restart_all_verb_scope
     owner = _host_multiplexer_for_all_verb()
     if owner is not None and not _host_multiplexer_is_ours(owner):
         # `--all` means "restart the ONE host multiplexer" — and this profile does not own it.
@@ -5402,11 +5402,11 @@ def _restart_all(system: bool) -> None:
         sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
     # No live owner: stop/kill/start as the host root, not as the invoking profile (whose own
     # gateway the run-side guard would refuse — the host stayed down after a Desktop update).
-    with host_scope_for_all_verb(owner):
-        _restart_all_as_host(owner, system)
+    with restart_all_verb_scope(owner) as owe_online_notice:
+        _restart_all_as_host(owner, system, detach, owe_online_notice)
 
 
-def _restart_all_as_host(owner, system: bool) -> None:
+def _restart_all_as_host(owner, system: bool, detach: bool = False, owe_online_notice=lambda: None) -> None:
     service_stopped = _stop_installed_service(system)
     if owner is not None:
         # Stop ONLY the host process: its served set comes back with it, and any per-profile
@@ -5426,8 +5426,8 @@ def _restart_all_as_host(owner, system: bool) -> None:
     # Retract the stopped owner's rendezvous record. Leaving it made this very function a silent
     # no-op: the re-entered `gateway run` below read the corpse's record and ATTACHED to it.
     _discard_dead_host_record()
-    # The retraction only invalidates when it removed a record; the pre-stop memo must go either way.
-    _forget_host_gateway_probe()
+    _forget_host_gateway_probe()  # the retraction invalidates only a removed record; drop the memo anyway
+    owe_online_notice()  # old host gone, new one not started: only the new boot can see it
 
     print("Starting gateway...")
     # Even without a registered task, gateway_windows.start() uses the detached launcher.
@@ -5436,11 +5436,11 @@ def _restart_all_as_host(owner, system: bool) -> None:
         _service_call(kind, "start", system)
         return
     from hermes_constants import get_routing_process_hermes_home, named_profile_home
-    if named_profile_home(get_routing_process_hermes_home()) is not None:
-        # A named profile's CLI never runs the root IN this process: os.environ holds that profile's
-        # .env and the root's dotenv load does not clear inherited keys, so the host served the
-        # default profile with the named profile's credentials. The detached child starts from the
-        # scrubbed host env (the root's own secrets only); `--replace` is part of its argv.
+    if detach or named_profile_home(get_routing_process_hermes_home()) is not None:
+        # Never run the root IN this process for `--detach` (the bounded caller would become the host
+        # gateway its timeout kills) or a named profile's CLI (os.environ holds that profile's .env,
+        # which the root's dotenv load does not clear: the host served default with its credentials).
+        # The detached child starts from the scrubbed host env; `--replace` is part of its argv.
         if not _spawn_detached_gateway():
             print_error("Failed to start the host gateway as a background process.")
             sys.exit(1)
@@ -5471,7 +5471,7 @@ def _cmd_restart(args):
     if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
         return
     if restart_all:
-        _restart_all(system)
+        _restart_all(system, getattr(args, "detach", False))
         return
 
     # Reap orphans only past the refusal guards above (#125394): the Desktop backend used to reap
@@ -5523,7 +5523,7 @@ def _cmd_restart(args):
     from gateway.status import get_running_pid
     from hermes_cli.gateway_supervised_restart import (
         gateway_declares_external_supervisor, refuse_restart_of_service_managed_gateway,
-        restart_externally_supervised_gateway,
+        restart_externally_supervised_gateway, start_restart_replacement,
     )
     supervised_pid = get_running_pid()
     if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
@@ -5537,7 +5537,7 @@ def _cmd_restart(args):
     _wait_for_api_server_port_free()
     _forget_host_gateway_probe()
     print("Starting gateway...")
-    run_gateway(verbose=0, force=force)
+    start_restart_replacement(args, force=force)
 
 
 # ``hermes gateway status`` hints for a manually-run / stopped gateway, keyed by host kind.
