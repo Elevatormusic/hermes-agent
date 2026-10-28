@@ -4,6 +4,7 @@ Pure-data leaf module — must not import from hermes_cli.config. Comments are t
 docs of config.yaml.
 """
 
+from hermes_cli.config_defaults_auxiliary import _aux
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
 #: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
@@ -15,9 +16,6 @@ LEGACY_SANDBOX_IMAGE = LEGACY_SANDBOX_IMAGES[0]
 # Vercel Sandbox managed image (Vercel deprecated its `runtime` presets in Aug 2026).
 DEFAULT_VERCEL_IMAGE = "vercel/sandbox/universal:latest"
 LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choice
-
-
-from hermes_cli.config_defaults_aux import _aux  # after the image constants, before DEFAULT_CONFIG
 
 
 DEFAULT_CONFIG = {
@@ -472,8 +470,7 @@ DEFAULT_CONFIG = {
     # and merged are removed; dirty or unpushed ones are archived to refs/hermes/archive/<tree>
     # first (`hermes worktree restore <name>`). Live trees and Kanban t_<hex> trees are never touched.
     "worktrees": {
-        # false = never remove a dirty/unpushed tree (the pre-archive behaviour, exactly).
-        "archive_dirty": True,
+        "archive_dirty": True,  # false = never remove a dirty/unpushed tree (the pre-archive behaviour)
         # Untracked files larger than this (MB) are not archived, so a tree holding one is kept.
         "archive_max_file_mb": 50,
         # The sweep deletes archive refs older than this many days. 0 keeps them forever.
@@ -481,6 +478,7 @@ DEFAULT_CONFIG = {
         # Optional size budget (GB) for idle trees: past it the oldest idle trees are archived and
         # removed first. Live, young and Kanban trees are never counted or touched. 0 = off.
         "max_total_gb": 0,
+        "install_state_retention_days": 14,  # installs/<key> of a missing checkout, unused this long, goes; 0 = never
     },
     # Filesystem checkpoints: snapshot the working directory once per turn (on the first
     # write_file/patch call); restore with /rollback. Opt-in via `hermes chat --checkpoints` or
@@ -580,7 +578,6 @@ DEFAULT_CONFIG = {
         # lower of the ratio threshold and this count. Clamped to the model's context length.
         # Off by default: no single count suits windows from 64K to 1M+, so the ratio decides.
         "threshold_tokens": None,
-        # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
         # digests, anchor index, verbatim user messages and session_search pointers in the summary
@@ -2086,6 +2083,15 @@ DEFAULT_CONFIG = {
         # OTLP destination. headers_env maps header names to ENVIRONMENT VARIABLE NAMES (never
         # secret values); values are read from the environment at export time.
         "export": {"otlp": {"enabled": False, "endpoint": "", "headers_env": {}}},
+    },
+    # Native hosted-room Discussion ceilings, shared by all members per discussion.
+    # Positive integers only (no unlimited/0). Read from the root owner's config at service
+    # startup for all hosted rooms; restart the owning service after changing them.
+    "hosted_rooms": {
+        "discussion": {
+            "max_rounds": 3,
+            "max_messages": 10,
+        },
     },
     "gateway": {  # Gateway settings (messaging platforms: Telegram, Discord, Slack, ...).
         "unmanaged_idle_exit_seconds": 600,  # client-auto-started gateway only; 0 disables

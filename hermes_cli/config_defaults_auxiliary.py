@@ -1,4 +1,4 @@
-"""Auxiliary-task model block factory for DEFAULT_CONFIG (pure-data leaf, like config_defaults)."""
+"""Pure-data factory for auxiliary model configuration defaults."""
 
 
 def _aux(timeout, *, reasoning_effort=True, **extra):
